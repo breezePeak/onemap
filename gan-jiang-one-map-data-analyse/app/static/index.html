@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>赣江 · 数据治理工作台</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<main>
+  <nav class="module-tabs" aria-label="功能模块">
+    <button data-module="mount" class="active" aria-pressed="true">1 · 项目文件夹挂载</button>
+    <button data-module="extract" aria-pressed="false">2 · 提取项目数据</button>
+    <button data-module="output" aria-pressed="false">3 · 数据制表</button>
+  </nav>
+  <section id="mountModule" class="mount-module">
+    <header class="mount-heading"><div><h1>项目文件夹挂载</h1><p>通过跨阶段相同文件建立关联候选，核对证据后确认属于同一项目。</p></div><button id="mountScan" class="primary">扫描并关联文件夹</button></header>
+    <p id="mountSource" class="manager-path"></p>
+    <p>原目录只读 · 复用已解压材料索引 · 不解压新包、不执行 OCR · 排除 PRJ/CPG 通用说明。共用附件仅作为线索，确认关系逐对保存。</p>
+    <div class="mount-toolbar"><input id="mountQuery" placeholder="搜索阶段、文件夹或关联文件" aria-label="搜索文件夹关联"><select id="mountFilter" aria-label="关联状态"><option value="all">全部关联</option><option value="pending">待确认</option><option value="confirmed">已确认同项目</option><option value="rejected">已排除</option><option value="unlinked">未找到跨阶段相同文件</option></select><span id="mountSummary" aria-live="polite"></span></div>
+    <p id="mountPhase" role="status"></p>
+    <div id="mountTable" class="mount-table-wrap"></div>
+    <div class="mount-toolbar"><button id="mountPrev" class="secondary">上一页</button><span id="mountPage"></span><button id="mountNext" class="secondary">下一页</button></div>
+    <details id="mountErrors" class="hidden"><summary>扫描异常 / 未读取文件</summary><pre id="mountErrorText"></pre></details>
+  </section>
+  <section id="outputModule" class="hidden"><h1>数据制表</h1><p>待下一阶段按制表要求实现。现有导出功能可在“提取项目数据”中使用。</p></section>
+  <div id="extractModule" class="extract-module hidden">
+  <section class="upload-card" id="dropZone">
+    <h1>项目数据回填</h1><div class="upload-copy"><h2 id="uploadTitle">上传需要补全的 Excel</h2><p id="uploadHelp">使用当前 69 列治理模板 · .xlsx · 最大 25 MB</p></div>
+    <input id="fileInput" type="file" accept=".xlsx" hidden><button id="chooseFile" class="secondary">选择 Excel</button><button id="searchBtn" class="primary" disabled>开始检索回填 →</button><button id="currentBtn" class="text-button">使用当前项目</button>
+    <details class="job-menu"><summary>最近任务</summary><div class="job-list"><button id="refreshJobs" class="text-button" aria-label="刷新最近任务">↻ 刷新任务</button><div id="recentJobs"></div><button id="manageJobs" class="text-button">🗂 管理已处理数据…</button></div></details>
+    <button id="storageBtn" class="secondary">原始文件与存储</button>
+    <button id="rerunBtn" class="secondary" disabled>按已确认字段重新检索</button>
+    <button id="exportBtn" class="primary" disabled>↓ 生成并下载 Excel</button>
+  </section>
+  <section id="progressCard" class="progress-card hidden" aria-live="polite"><div><span class="spinner"></span><strong id="phase">等待检索</strong><span id="progressNumber">0%</span></div><progress id="progressBar" max="100" value="0"></progress><details><summary>查看实时运行日志</summary><pre id="runLog"></pre></details></section>
+  <section class="stats" id="stats"><button data-filter="filled"><span>自动补全</span><strong id="filledCount">—</strong><small><i class="dot green"></i> 唯一且可靠的结果</small></button><button data-filter="review"><span>待确认</span><strong id="conflictCount">—</strong><small><i class="dot amber"></i> 冲突或候选待选择</small></button><button data-filter="selected"><span>人工已确认</span><strong id="selectedCount">—</strong><small><i class="dot blue"></i> 已保存你的选择</small></button><button data-filter="empty"><span>尚缺证据</span><strong id="emptyCount">—</strong><small><i class="dot gray"></i> 保留空白，等待补充</small></button></section>
+  <section class="workspace">
+    <div class="sheet-panel"><div class="sheet-controls">
+      <nav class="stage-tabs" aria-label="阶段筛选" id="stageTabs"></nav>
+      <div class="table-toolbar"><label class="search-field"><span>⌕</span><input id="searchInput" placeholder="搜索项目名称或档案编号" aria-label="搜索项目"></label><select id="statusFilter" aria-label="筛选状态"><option value="all">全部单元格</option><option value="review">待确认</option><option value="filled">自动补全</option><option value="selected">人工已确认</option><option value="empty">尚缺证据</option></select><span id="rowCount">0 个项目</span></div>
+      </div>
+      <div class="table-wrap" id="tableWrap"><div class="empty-state"><div class="empty-grid">▦</div><h3>把分散的材料，连接到同一张表</h3><p>上传目标 Excel 后，这里会展示原值、补全结果和待选择的冲突。</p><button id="emptyCurrent" class="secondary">检索当前 11 个项目 →</button></div></div>
+      <footer class="table-footer"><span id="saveStatus">点击任意单元格，查看候选和来源</span><span>未确认的冲突在导出时保留原值</span></footer>
+    </div>
+    <aside class="inspector hidden" id="inspector" aria-label="字段来源与选择"></aside>
+  </section>
+  <details class="log-section" id="completedLogs"><summary>检索日志与后续识别任务 <span>NEEDS_LLM · NEEDS_FUZZY · CONFLICT</span></summary><p id="logDownloads" class="hidden"><a id="fullLog" href="#">下载完整日志</a>　<a id="taskQueue" href="#">下载待识别队列</a>　<a id="unassociated" class="hidden" href="#">下载未关联材料</a>　<a id="recognition" class="hidden" href="#">下载识别统计</a></p><pre id="completedLog">尚未运行</pre></details>
+  <section id="governanceDownloads" class="log-section hidden"><h2>治理成果</h2><p>检索完成后可下载；补建项目与阶段材料仍需业务核对。目录组织标准和项目类型新标准尚未提供。</p><p><a id="bundle" href="#">全部治理成果 ZIP</a>　<a id="selection" href="#">选址意见书信息表</a>　<a id="new-projects" href="#">含补建项目的完整表</a>　<a id="materials" href="#">阶段材料清单</a>　<a id="vectors" href="#">附件矢量清单</a>　<a id="missing-shp" href="#">缺少 SHP 项目</a>　<a id="mapping" href="#">监管号与单元号映射</a>　<a id="resolution" href="#">整体挂接消歧</a>　<a id="cad" href="#">CAD实体清单</a>　<a id="cad-status" href="#">CAD读取状态</a>　<a id="coordinate-pending" href="#">矢量坐标待确认</a>　<a id="source-errors" href="#">来源异常清单</a></p></section>
+  </div>
+</main>
+<div id="toast" class="toast hidden" role="alert"></div>
+<dialog id="managerDialog" aria-labelledby="managerTitle">
+  <header class="spatial-header"><div><h2 id="managerTitle">已处理数据管理</h2><p id="managerSubtitle">程序处理产生的数据文件与任务在本机的存储目录、占用空间，可删除不需要的数据</p></div><button id="closeManager" class="secondary" autofocus>关闭 ✕</button></header>
+  <div class="manager-tabs"><button id="tabStorage">原始文件与存储</button><button id="tabDataFiles" class="active">数据文件</button><button id="tabJobs">处理任务</button><button id="refreshManager" class="secondary">↻ 刷新</button></div>
+  <div id="managerContent" aria-live="polite"></div>
+</dialog>
+<dialog id="spatialDialog" aria-labelledby="spatialTitle">
+  <header class="spatial-header"><div><h2 id="spatialTitle">空间相交图</h2><p id="spatialSubtitle"></p></div><button id="closeSpatial" class="secondary" autofocus>关闭 ✕</button></header>
+  <div id="spatialContent" aria-live="polite"></div>
+</dialog>
+<script src="/app.js"></script>
+<script src="/spatial.js"></script>
+<script src="/matching.js"></script>
+<script src="/mount.js"></script>
+</body></html>
