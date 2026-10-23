@@ -168,6 +168,12 @@ function mountEvidence(link,autoPreviewFirst=false){
               fTitleRow.append(fIcon,fTitle);
               fileCard.append(fTitleRow);
 
+              if(material.small_dir){
+                const dirTag=node('div','📁 命中小目录: '+material.small_dir,'mount-small-dir-tag');
+                dirTag.title='证据所在小目录: '+material.small_dir;
+                fileCard.append(dirTag);
+              }
+
               if(material.archive_chain?.length||material.logical_path?.includes('!')){
                 const zipBadge=node('span','📦 提取自压缩包','mount-archive-tag');
                 zipBadge.title='该附件来源于压缩包解压内容';
@@ -369,11 +375,20 @@ function renderMount(){
     const line=mountPathNode(item.path,'select',`⚠ ${item.error} · `);
     errBox.append(line);
   }
+  // 动态渲染全部七个阶段表头与单元格
   const table=node('table',undefined,'mount-table mount-projects'),head=node('thead'),tr=node('tr'),body=node('tbody');
-  for(const label of ['项目','S1 · 用地预审与选址','S2 · 规划条件与用地红线','S3 · 用地报批','S4 · 土地供应','状态 / 核对'])tr.append(node('th',label));head.append(tr);table.append(head,body);
+  tr.append(node('th','业务项目大目录'));
+  for(const stage of data.stage_config||[]){
+    tr.append(node('th',stage.stage_id+' · '+(stage.title||stage.name)));
+  }
+  tr.append(node('th','状态 / 核对'));
+  head.append(tr);table.append(head,body);
+
   for(const project of data.rows||[]){
     const row=node('tr'),name=node('td');name.append(node('strong',project.name));row.append(name);
-    for(const stage of ['S1','S2','S3','S4'])row.append(mountProjectCell(project.stages[stage]));
+    for(const stage of data.stage_config||[]){
+      row.append(mountProjectCell(project.stages[stage.stage_id]||[]));
+    }
     const actions=node('td');actions.append(node('span',mountLabels[project.status],`mount-status-badge status-${project.status}`));
     if(project.ambiguous)actions.append(node('small','多个候选，需核对','mount-warning'));
     if(project.links.length){
@@ -386,7 +401,24 @@ function renderMount(){
     row.append(actions);body.append(row);
   }
   $('mountTable').replaceChildren(table);
-  if(!body.children.length)$('mountTable').append(node('p',running?'正在检查真实数据源材料，完成后更新四阶段项目表。':'暂无符合条件的项目。','manager-empty'));
+  if(!body.children.length)$('mountTable').append(node('p',running?'正在检查真实数据源材料，完成后更新七阶段项目大目录表。':'暂无符合条件的项目。','manager-empty'));
+
+  // 渲染大模型研判存库的项目大目录列表
+  if($('mountProjectCatalogContent')&&data.projects?.length){
+    const pTable=node('table',undefined,'mount-table'),pHead=node('tr'),pBody=node('tbody');
+    for(const h of ['阶段','项目大目录名称','相对路径','置信度','判定理由'])pHead.append(node('th',h));
+    const pThead=node('thead');pThead.append(pHead);pTable.append(pThead,pBody);
+    for(const p of data.projects){
+      const pRow=node('tr');
+      pRow.append(node('td',p.stage_id+' · '+(p.stage_name||'')));
+      pRow.append(node('td',p.project_name));
+      pRow.append(node('td',p.project_root));
+      pRow.append(node('td',p.confidence||'high'));
+      pRow.append(node('td',p.reason||''));
+      pBody.append(pRow);
+    }
+    $('mountProjectCatalogContent').replaceChildren(pTable);
+  }
   $('mountChains').replaceChildren(...data.chains.map(chain=>node('p',chain.map(f=>f.stage+' · '+f.name).join(' → '))));
   if(!data.chains.length)$('mountChains').append(node('p','尚无连续两条以上的人工确认关系。相邻候选不会自动生成确定链路。'));
 

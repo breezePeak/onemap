@@ -21,7 +21,15 @@ sys.path.insert(0,str(BASE/'scripts'))
 from review_service import JOBS,SOURCE,read_json,write_json,validate_upload,prepare_job,run_step,collect_review,resolve_review,save_choice,export_review,spatial_preview,save_judgement,save_alias,save_coordinate_system,save_georeference,save_relationship_decision
 from storage_info import storage_info
 from folder_mount import scan_folders, validate_methods, PreparationError, RULE_VERSION, identifier, project_rows
-from source_config import STAGES
+from source_config import STAGES, STAGE_TITLES
+from project_catalog import ProjectCatalog
+
+def get_catalog_projects():
+    cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
+    try: return list(cat.projects.values())
+    finally: cat.close()
+
+from organize_independent_documents import organize_independent_documents
 
 MOUNT_DIR=BASE/'work/folder_mount'
 MOUNT_LOCK=threading.RLock()
@@ -44,8 +52,9 @@ def mount_update(**changes):
 
 def mount_scan(methods=None):
     try:
+        organize_independent_documents(root=SOURCE, verbose=False)
         def progress(value): mount_update(**value)
-        result,cache=scan_folders(SOURCE,BASE/'解压材料/解压记录.sqlite',read_json(MOUNT_DIR/'hashes.json',{}),progress,methods)
+        result,cache=scan_folders(SOURCE,BASE/'解压材料/解压记录.sqlite',read_json(MOUNT_DIR/'hashes.json',{}),progress,methods,storage_dir=MOUNT_DIR)
         with MOUNT_LOCK:
             write_json(MOUNT_DIR/'hashes.json',cache)
             write_json(MOUNT_DIR/'result.json',dict(result,scanned_at=datetime.now().isoformat(timespec='seconds')))
@@ -149,7 +158,7 @@ def mount_view(params=None):
     for group in outgoing.values():
         for link in group: chain([link])
     response=dict(status=state['status'],phase=state['phase'],processed=state.get('processed',0),total=state.get('total',0),current_stage=state.get('current_stage',''),current_archive=state.get('current_archive',''),current_member=state.get('current_member',''),
-                source_root=str(SOURCE),stage_config=[dict(stage_id=s,name=n) for s,n in STAGES],stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
+                source_root=str(SOURCE),stage_config=[dict(stage_id=s,name=n,title=STAGE_TITLES.get(s,n)) for s,n in STAGES],projects=get_catalog_projects(),stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
                 links=[compact(e) for e in visible] if status!='unlinked' else [],unlinked=visible if status=='unlinked' else [],
                 errors=state.get('errors',result.get('errors',[])),historical=historical,scanned_at=result.get('scanned_at'),
                 summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked)),
@@ -289,6 +298,10 @@ class Handler(BaseHTTPRequestHandler):
             parts=urlsplit(self.path).path.strip('/').split('/')
             if parts==['api','folder-mount']:
                 with MOUNT_LOCK:return self.json(mount_view(parse_qs(urlsplit(self.path).query)))
+            if parts==['api','folder-mount','projects']:
+                with MOUNT_LOCK:
+                    projs=get_catalog_projects()
+                    return self.json(dict(projects=projs,count=len(projs)))
             if parts==['api','folder-mount','file']:
                 params=parse_qs(urlsplit(self.path).query)
                 target=resolve_mount_path(params.get('path',[''])[0])
@@ -404,6 +417,12 @@ class Handler(BaseHTTPRequestHandler):
             if parts==['api','folder-mount','open-path']:
                 payload=json.loads(self.body(65536))
                 return self.json(open_local_path(payload.get('path',''),payload.get('action','folder')))
+            if parts==['api','folder-mount','adjust-project']:
+                payload=json.loads(self.body(65536))
+                with MOUNT_LOCK:
+                    catalog=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
+                    updated=catalog.update_project_boundary(payload.get('project_id'),payload.get('new_root_rel'),payload.get('new_name'))
+                    return self.json(dict(updated=updated))
             if parts==['api','folder-mount','scan']:
                 payload=json.loads(self.body(65536)); validate_methods(payload.get('methods'))
                 with MOUNT_LOCK:

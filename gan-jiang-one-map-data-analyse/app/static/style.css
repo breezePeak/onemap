@@ -184,3 +184,6 @@ td:first-child{position:sticky;left:0;z-index:1;padding:4px 6px;background:#f8fa
 .mount-preview-Actions-large{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
 .mount-preview-Actions-large button{padding:8px 16px;font-size:12px;min-height:34px}
 @media(max-width:960px){.mount-review-layout{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.mount-evidence-pair{grid-template-columns:1fr}}
+
+.mount-small-dir-tag { font-size: 11px; color: #475569; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; margin: 4px 0; word-break: break-all; border-left: 2px solid #3b82f6; }
+

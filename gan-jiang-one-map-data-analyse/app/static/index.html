@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>赣江 · 数据治理工作台</title><link rel="stylesheet" href="/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>赣江 · 数据治理工作台</title><link rel="stylesheet" href="/style.css?v=7stages"></head>
 <body>
 <main>
   <nav class="module-tabs" aria-label="功能模块">
@@ -18,10 +18,47 @@
       <label><input type="checkbox" value="M5" disabled> M5 栅格图件与矢量人工判读（暂未实现）</label>
     </fieldset><button id="mountScan" class="primary">扫描 / 更新目录关联</button>
     </div>
-    <div class="mount-toolbar"><select id="mountPair" aria-label="项目包含阶段"><option value="all">全部项目</option><option value="S1">含 S1 材料</option><option value="S2">含 S2 材料</option><option value="S3">含 S3 材料</option><option value="S4">含 S4 材料</option></select><input id="mountQuery" placeholder="搜索项目、原始文件夹或附件" aria-label="搜索文件夹关联"><select id="mountFilter" aria-label="关联状态"><option value="all">全部项目</option><option value="unscanned">待匹配</option><option value="pending">待确认</option><option value="confirmed">已确认同项目</option><option value="rejected">已排除</option><option value="review">需复核</option><option value="unlinked">未找到对应项目</option></select><span id="mountSummary" aria-live="polite"></span><span id="mountPhase" role="status"></span></div>
+    <div class="mount-toolbar">
+      <select id="mountPair" aria-label="项目包含阶段">
+        <option value="all">全部项目 / 阶段</option>
+        <optgroup label="单阶段材料筛选">
+          <option value="S1">S1 · 用地预审与选址</option>
+          <option value="S2">S2 · 规划条件出具</option>
+          <option value="S3">S3 · 批次报批阶段</option>
+          <option value="S4">S4 · 土地供应阶段</option>
+          <option value="S5">S5 · 土地首次登记</option>
+          <option value="S6">S6 · 用地规划</option>
+          <option value="S7">S7 · 工程规划</option>
+        </optgroup>
+        <optgroup label="常用跨阶段关联组合">
+          <option value="S1-S2">S1 ➔ S2</option>
+          <option value="S1-S3">S1 ➔ S3</option>
+          <option value="S1-S4">S1 ➔ S4</option>
+          <option value="S1-S7">S1 ➔ S7</option>
+          <option value="S2-S3">S2 ➔ S3</option>
+          <option value="S2-S4">S2 ➔ S4</option>
+          <option value="S3-S4">S3 ➔ S4</option>
+          <option value="S4-S5">S4 ➔ S5</option>
+          <option value="S6-S7">S6 ➔ S7</option>
+        </optgroup>
+      </select>
+      <input id="mountQuery" placeholder="搜索项目大目录、命中小目录或附件" aria-label="搜索文件夹关联">
+      <select id="mountFilter" aria-label="关联状态">
+        <option value="all">全部状态</option>
+        <option value="unscanned">待匹配</option>
+        <option value="pending">候选待确认</option>
+        <option value="confirmed">已确认同项目</option>
+        <option value="rejected">已排除</option>
+        <option value="review">需复核</option>
+        <option value="unlinked">未找到对应项目</option>
+      </select>
+      <span id="mountSummary" aria-live="polite"></span>
+      <span id="mountPhase" role="status"></span>
+    </div>
     <div id="mountTable" class="mount-table-wrap"></div>
     <div class="mount-toolbar"><button id="mountPrev" class="secondary">上一页</button><span id="mountPage"></span><button id="mountNext" class="secondary">下一页</button></div>
-    <details id="mountStatistics"><summary>扫描统计</summary><div id="mountStages" class="mount-table-wrap"></div></details>
+    <details id="mountProjectTree"><summary>各阶段业务项目大目录识别结果（大模型研判存库）</summary><div id="mountProjectCatalogContent" class="mount-table-wrap"></div></details>
+    <details id="mountStatistics"><summary>七阶段扫描与解压统计</summary><div id="mountStages" class="mount-table-wrap"></div></details>
     <details><summary>已人工确认的多阶段链路（最多展示200条）</summary><div id="mountChains"></div></details>
     <details id="mountErrors" class="hidden"><summary>扫描异常 / 未读取文件</summary><pre id="mountErrorText"></pre></details>
   </section>
@@ -77,5 +114,5 @@
 <script src="/app.js"></script>
 <script src="/spatial.js"></script>
 <script src="/matching.js"></script>
-<script src="/mount.js"></script>
+<script src="/mount.js?v=7stages"></script>
 </body></html>
