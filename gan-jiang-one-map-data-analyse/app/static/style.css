@@ -84,3 +84,103 @@ td:first-child{position:sticky;left:0;z-index:1;padding:4px 6px;background:#f8fa
 @media(max-width:760px){#managerDialog{width:96vw;max-width:96vw;height:94dvh;max-height:94dvh}.manager-table{table-layout:auto}.manager-table th:nth-child(n){width:auto}}
 
 .matching-editor{margin:8px 0;padding:8px;border:1px solid var(--line);border-radius:5px}.matching-editor input,.matching-editor select,.spatial-list select,.spatial-list textarea,.spatial-list input:not([type="checkbox"]){width:100%;max-width:100%;box-sizing:border-box;margin:5px 0;padding:6px;border:1px solid #cbd7d0;border-radius:4px;background:white;color:inherit}.spatial-list>button.secondary{white-space:normal;text-align:left;margin:3px 0}.spatial-list details{margin:12px 0;padding:8px;border:1px solid #dce5e0;border-radius:5px}
+
+#mountMethods{display:flex;flex:1;flex-wrap:wrap;gap:8px 14px;margin:0;min-width:0;border:0;padding:4px 0}#mountMethods label{display:flex;align-items:center;gap:6px}#mountMethods input{width:auto}#mountMethods label:has(input:disabled){color:#657080}.mount-warning{color:#9b4b08;font-weight:600}#mountPhase{overflow-wrap:anywhere}.mount-evidence p{white-space:pre-wrap;overflow-wrap:anywhere}.mount-table td{vertical-align:top}.mount-table td:last-child button{margin:3px}.mount-table details input{max-width:100%;margin:10px 0}
+
+#mountStages{flex:none;max-height:230px;margin-bottom:10px}#mountStages th{width:auto}#mountStages th:first-child{width:32%}.mount-module{overflow:auto}#mountTable{min-height:200px}
+
+.mount-controls{display:flex;align-items:center;gap:12px;flex-shrink:0}.mount-controls>button{flex-shrink:0}#mountModule{padding:10px}#mountModule>.mount-toolbar{padding:6px 0;flex-shrink:0}#mountPhase{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:180px;text-align:right}#mountTable .mount-table th,#mountTable .mount-table td{padding:8px}#mountStatistics{margin:2px 0}#mountStatistics[open]{flex-shrink:0}#mountMethods legend{font-size:11px;color:var(--muted)}
+#mountTable td:last-child button{display:inline-block;padding:5px 7px;margin:2px}
+
+#mountTable .mount-projects th{width:18%}#mountTable .mount-projects th:first-child{width:16%}#mountTable .mount-projects th:last-child{width:12%}.mount-project-folder{margin:2px 0 8px}.mount-project-folder .manager-path{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:11px}.mount-project-folder small,.mount-projects td:last-child>small,.mount-relation>small{display:block}.mount-relation{padding:8px 0;border-top:1px solid var(--line)}.mount-missing{color:var(--muted)}.mount-projects td:last-child details[open]{min-width:260px}.mount-projects td:first-child strong{font-size:13px}
+
+.clickable-path{cursor:pointer;color:#22634d;text-decoration:underline;text-decoration-color:#a5c7b5;text-underline-offset:2px;border-radius:3px;padding:1px 3px;transition:background .15s,color .15s}
+.clickable-path:hover{background:#eaf5ee;color:#144533;text-decoration-color:#22634d}
+.mount-review-trigger{display:block;width:100%;margin-top:6px!important;padding:6px 10px!important;font-size:11px;font-weight:600;text-align:center}
+.mount-status-badge{display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:700;background:#edf2ec;color:#345c44}
+.mount-status-badge.status-pending{background:#fef3c7;color:#92400e;border:1px solid #fde68a}
+.mount-status-badge.status-confirmed{background:#dcfce7;color:#166534;border:1px solid #bbf7d0}
+.mount-status-badge.status-rejected{background:#fee2e2;color:#991b1b;border:1px solid #fecaca}
+.mount-status-badge.status-review{background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe}
+#mountReviewDialog{width:min(1480px,96vw);height:min(900px,94dvh);max-width:96vw;max-height:94dvh;margin:auto;padding:0;border:1px solid #a8bbb3;border-radius:12px;color:var(--ink);background:#fff;box-shadow:0 20px 90px #102c3b55;overflow:hidden}
+#mountReviewDialog[open]{display:flex;flex-direction:column}
+#mountReviewDialog::backdrop{background:#142e3b80;backdrop-filter:blur(2px)}
+.mount-review-layout{display:grid;grid-template-columns:minmax(460px,46%) minmax(0,54%);min-height:0;flex:1;overflow:hidden}
+.mount-review-left{min-height:0;overflow-y:auto;padding:14px 16px;border-right:1px solid var(--line);background:#f6f8f6;display:flex;flex-direction:column;gap:14px}
+.mount-review-right{min-height:0;display:flex;flex-direction:column;background:#fff;overflow:hidden}
+
+.mount-dialog-stages-collapse{background:#fff;border:1px solid #dce6df;border-radius:8px;padding:8px 12px;font-size:11px;color:#496154}
+.mount-dialog-stages-collapse summary{cursor:pointer;font-weight:600;color:#22634d;outline:none}
+.mount-dialog-stages-collapse[open]{padding:10px 12px}
+.mount-dialog-stages-collapse[open] summary{margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid #edf2ee}
+.mount-dialog-stages-body{display:flex;flex-direction:column;gap:6px}
+.mount-dialog-stage-item{padding-bottom:6px;border-bottom:1px dashed #e5ede7}
+.mount-dialog-stage-item:last-child{padding-bottom:0;border-bottom:0}
+
+.mount-relation-card{background:#fff;border:1px solid #cad8cf;border-radius:10px;box-shadow:0 3px 10px #19382e0d;overflow:hidden}
+.mount-relation-header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 14px;background:linear-gradient(135deg, #eef7f2 0%, #e3f2e9 100%);border-bottom:1px solid #c2dbcd;border-left:5px solid #1a6644}
+.mount-relation-title-area{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;flex:1}
+.mount-relation-title{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:13px;color:#143528}
+.mount-stage-pill{display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:700;color:#fff;background:#22634d}
+.mount-stage-pill.stage-s1{background:#1d4ed8}
+.mount-stage-pill.stage-s2{background:#0d9488}
+.mount-stage-pill.stage-s3{background:#b45309}
+.mount-stage-pill.stage-s4{background:#15803d}
+.mount-relation-nodename{font-size:13px;font-weight:700;color:#0e2e21}
+.mount-relation-arrow{font-size:14px;font-weight:800;color:#22634d;margin:0 2px}
+
+.mount-relation-header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.mount-relation-header-actions button{padding:6px 14px;border-radius:6px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:4px;transition:all .15s ease}
+.mount-btn-confirm{background:#15803d !important;color:#fff !important;border:1px solid #166534 !important;box-shadow:0 2px 6px #15803d40;font-size:13px !important;font-weight:700 !important;padding:7px 16px !important}
+.mount-btn-confirm:hover{background:#166534 !important}
+.mount-btn-reject{background:#fff !important;color:#b91c1c !important;border:1px solid #f87171 !important}
+.mount-btn-reject:hover{background:#fee2e2 !important}
+.mount-btn-review{background:#fff !important;color:#2563eb !important;border:1px solid #93c5fd !important}
+.mount-btn-review:hover{background:#eff6ff !important}
+
+.mount-relation-folders-collapse{margin:8px 12px;padding:6px 10px;background:#f8faf9;border:1px solid #e2ebe5;border-radius:6px;font-size:11px}
+.mount-relation-folders-collapse summary{cursor:pointer;color:#4b6657;font-weight:600;outline:none}
+.mount-relation-folders-inner{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+
+.mount-evidence-container{padding:10px 14px 14px;display:flex;flex-direction:column;gap:10px}
+.mount-evidence-topbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.mount-evidence-topbar input{flex:1;min-width:180px;padding:6px 10px;border:1px solid #cbd7d0;border-radius:6px;font-size:12px}
+.mount-evidence-topbar strong{color:#1a4d3b;font-size:13px}
+
+.mount-evidence{margin:6px 0;padding:12px;background:#f9fbf9;border:1px solid #d8e5dd;border-radius:8px;font-size:11px}
+.mount-sha-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid #e1ebe4}
+.mount-sha-tag{display:inline-block;padding:2px 8px;border-radius:4px;background:#e5f3ec;color:#185a3c;font-size:11px;font-weight:700}
+.mount-sha-hash{font-family:Consolas,monospace;font-size:11px;color:#6b7280;cursor:help}
+
+.mount-evidence-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mount-evidence-side{display:flex;flex-direction:column;gap:8px;min-width:0}
+.mount-side-title{font-weight:700;color:#1e432c;font-size:12px;padding-bottom:4px;border-bottom:2px solid #e1ebe4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.mount-file-card{background:#fff;border:1px solid #cfded4;border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px;cursor:pointer;transition:border-color .15s,box-shadow .15s,background .15s}
+.mount-file-card:hover{border-color:#22634d;box-shadow:0 3px 8px #19382e12}
+.mount-file-card.active{border-color:#15803d;background:#f0fdf4;box-shadow:inset 3px 0 #15803d, 0 2px 6px #15803d20}
+.mount-file-main{display:flex;align-items:flex-start;gap:6px}
+.mount-file-icon{font-size:15px;line-height:1.2;flex-shrink:0}
+.mount-file-name{font-weight:700;color:#0e2e21;font-size:12px;line-height:1.4;word-break:break-all}
+.mount-archive-tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;background:#fef3c7;color:#92400e;align-self:flex-start}
+
+.mount-file-btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.mount-file-btns button{padding:4px 9px;min-height:26px;font-size:11px;border-radius:4px}
+.mount-preview-empty{margin:auto;padding:40px;text-align:center;color:#75827c;font-size:13px}
+.mount-preview-head{padding:12px 16px;background:#f4f8f6;border-bottom:1px solid var(--line);flex-shrink:0;display:flex;flex-direction:column;gap:5px}
+.mount-preview-head .manager-path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;color:#557062;max-width:100%}
+.mount-preview-title{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink);word-break:break-all}
+.mount-stage-badge{background:#22634d;color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;white-space:nowrap}
+.mount-preview-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.mount-action-link{text-decoration:none;display:inline-flex;align-items:center}
+.mount-preview-body{flex:1;min-height:0;display:flex;flex-direction:column;background:#eef2ef;overflow:auto}
+.mount-preview-frame{width:100%;height:100%;flex:1;border:0;background:#fff}
+.mount-preview-img-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;overflow:auto}
+.mount-preview-image{max-width:100%;max-height:100%;object-fit:contain;background:#fff;box-shadow:0 4px 18px #0000001a}
+.mount-preview-text{margin:0;padding:16px;flex:1;overflow:auto;background:#fff;font:12px/1.6 Consolas,"Microsoft YaHei",monospace;color:#24382e;white-space:pre-wrap;word-break:break-all}
+.mount-preview-unsupported{margin:auto;max-width:520px;background:#fff;border:1px solid #d8e3dc;border-radius:10px;padding:28px;text-align:center;box-shadow:0 6px 24px #19382e12}
+.mount-preview-unsupported h3{margin:0 0 10px;color:var(--ink);word-break:break-all}
+.mount-preview-unsupported p{color:#5e7266;line-height:1.7;margin:0 0 18px}
+.mount-preview-Actions-large{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.mount-preview-Actions-large button{padding:8px 16px;font-size:12px;min-height:34px}
+@media(max-width:960px){.mount-review-layout{grid-template-columns:1fr;grid-template-rows:1fr 1fr}.mount-evidence-pair{grid-template-columns:1fr}}

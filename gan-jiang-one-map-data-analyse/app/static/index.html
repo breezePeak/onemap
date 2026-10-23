@@ -4,18 +4,25 @@
 <body>
 <main>
   <nav class="module-tabs" aria-label="功能模块">
-    <button data-module="mount" class="active" aria-pressed="true">1 · 项目文件夹挂载</button>
+    <button data-module="mount" class="active" aria-pressed="true">1 · 目录关联</button>
     <button data-module="extract" aria-pressed="false">2 · 提取项目数据</button>
     <button data-module="output" aria-pressed="false">3 · 数据制表</button>
   </nav>
   <section id="mountModule" class="mount-module">
-    <header class="mount-heading"><div><h1>项目文件夹挂载</h1><p>通过跨阶段相同文件建立关联候选，核对证据后确认属于同一项目。</p></div><button id="mountScan" class="primary">扫描并关联文件夹</button></header>
-    <p id="mountSource" class="manager-path"></p>
-    <p>原目录只读 · 复用已解压材料索引 · 不解压新包、不执行 OCR · 排除 PRJ/CPG 通用说明。共用附件仅作为线索，确认关系逐对保存。</p>
-    <div class="mount-toolbar"><input id="mountQuery" placeholder="搜索阶段、文件夹或关联文件" aria-label="搜索文件夹关联"><select id="mountFilter" aria-label="关联状态"><option value="all">全部关联</option><option value="pending">待确认</option><option value="confirmed">已确认同项目</option><option value="rejected">已排除</option><option value="unlinked">未找到跨阶段相同文件</option></select><span id="mountSummary" aria-live="polite"></span></div>
-    <p id="mountPhase" role="status"></p>
+    <div class="mount-controls">
+    <fieldset id="mountMethods"><legend>匹配方法</legend>
+      <label><input type="checkbox" value="M1" disabled> M1 项目代码精确关联（暂未实现）</label>
+      <label><input type="checkbox" value="M2" checked> M2 相同附件材料精确关联</label>
+      <label><input type="checkbox" value="M3" disabled> M3 空间信息模糊匹配（暂未实现）</label>
+      <label><input type="checkbox" value="M4" disabled> M4 属性信息模糊匹配（暂未实现）</label>
+      <label><input type="checkbox" value="M5" disabled> M5 栅格图件与矢量人工判读（暂未实现）</label>
+    </fieldset><button id="mountScan" class="primary">扫描 / 更新目录关联</button>
+    </div>
+    <div class="mount-toolbar"><select id="mountPair" aria-label="项目包含阶段"><option value="all">全部项目</option><option value="S1">含 S1 材料</option><option value="S2">含 S2 材料</option><option value="S3">含 S3 材料</option><option value="S4">含 S4 材料</option></select><input id="mountQuery" placeholder="搜索项目、原始文件夹或附件" aria-label="搜索文件夹关联"><select id="mountFilter" aria-label="关联状态"><option value="all">全部项目</option><option value="unscanned">待匹配</option><option value="pending">待确认</option><option value="confirmed">已确认同项目</option><option value="rejected">已排除</option><option value="review">需复核</option><option value="unlinked">未找到对应项目</option></select><span id="mountSummary" aria-live="polite"></span><span id="mountPhase" role="status"></span></div>
     <div id="mountTable" class="mount-table-wrap"></div>
     <div class="mount-toolbar"><button id="mountPrev" class="secondary">上一页</button><span id="mountPage"></span><button id="mountNext" class="secondary">下一页</button></div>
+    <details id="mountStatistics"><summary>扫描统计</summary><div id="mountStages" class="mount-table-wrap"></div></details>
+    <details><summary>已人工确认的多阶段链路（最多展示200条）</summary><div id="mountChains"></div></details>
     <details id="mountErrors" class="hidden"><summary>扫描异常 / 未读取文件</summary><pre id="mountErrorText"></pre></details>
   </section>
   <section id="outputModule" class="hidden"><h1>数据制表</h1><p>待下一阶段按制表要求实现。现有导出功能可在“提取项目数据”中使用。</p></section>
@@ -53,6 +60,19 @@
 <dialog id="spatialDialog" aria-labelledby="spatialTitle">
   <header class="spatial-header"><div><h2 id="spatialTitle">空间相交图</h2><p id="spatialSubtitle"></p></div><button id="closeSpatial" class="secondary" autofocus>关闭 ✕</button></header>
   <div id="spatialContent" aria-live="polite"></div>
+</dialog>
+<dialog id="mountReviewDialog" aria-labelledby="mountReviewTitle">
+  <header class="spatial-header">
+    <div>
+      <h2 id="mountReviewTitle">跨阶段关联核对与材料预览</h2>
+      <p id="mountReviewSubtitle"></p>
+    </div>
+    <button id="closeMountReview" class="secondary" autofocus>关闭 ✕</button>
+  </header>
+  <div id="mountReviewContent" class="mount-review-layout" aria-live="polite">
+    <div id="mountReviewLeft" class="mount-review-left"></div>
+    <div id="mountReviewRight" class="mount-review-right"></div>
+  </div>
 </dialog>
 <script src="/app.js"></script>
 <script src="/spatial.js"></script>

@@ -15,7 +15,7 @@ from match_engine import decide,normalize
 from link_stages import is_project_row,row_identity,target_records
 
 BASE=Path(__file__).resolve().parent.parent
-SOURCE=Path(r'F:\项目数据\赣江一张图')
+from source_config import SOURCE
 JOBS=BASE/'work'/'jobs'
 RUNTIME=Path(os.environ['USERPROFILE'])/'.cache/codex-runtimes/codex-primary-runtime/dependencies'
 NODE=RUNTIME/'node/bin/node.exe'

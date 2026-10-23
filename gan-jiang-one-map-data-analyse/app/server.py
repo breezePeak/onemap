@@ -9,8 +9,10 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import threading
+import time
 from urllib.parse import unquote,urlsplit,quote,parse_qs
 import uuid
 
@@ -18,34 +20,149 @@ BASE=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(BASE/'scripts'))
 from review_service import JOBS,SOURCE,read_json,write_json,validate_upload,prepare_job,run_step,collect_review,resolve_review,save_choice,export_review,spatial_preview,save_judgement,save_alias,save_coordinate_system,save_georeference,save_relationship_decision
 from storage_info import storage_info
-from folder_mount import scan_folders
+from folder_mount import scan_folders, validate_methods, PreparationError, RULE_VERSION, identifier, project_rows
+from source_config import STAGES
 
 MOUNT_DIR=BASE/'work/folder_mount'
 MOUNT_LOCK=threading.RLock()
 MOUNT_POOL=ThreadPoolExecutor(max_workers=1)
-MOUNT_STATE=dict(status='idle',phase='尚未扫描')
+MOUNT_STATE=read_json(MOUNT_DIR/'task.json',dict(status='idle',phase='尚未扫描'))
+if MOUNT_STATE['status']=='running':
+    MOUNT_STATE.update(status='interrupted',phase='上次任务因服务重启中断，请重新扫描；已验证成员可以复用')
 
-def mount_scan():
+
+MOUNT_LAST_SAVE=0
+
+def mount_update(**changes):
+    global MOUNT_LAST_SAVE
+    with MOUNT_LOCK:
+        MOUNT_STATE.update(changes)
+        if 'status' in changes or time.monotonic()-MOUNT_LAST_SAVE>=0.5:
+            write_json(MOUNT_DIR/'task.json',MOUNT_STATE)
+            MOUNT_LAST_SAVE=time.monotonic()
+
+
+def mount_scan(methods=None):
     try:
-        def progress(done,total):
-            with MOUNT_LOCK:MOUNT_STATE.update(phase=f'正在核对文件内容 {done}/{total}')
-        result,cache=scan_folders(SOURCE,BASE/'解压材料/解压记录.sqlite',read_json(MOUNT_DIR/'hashes.json',{}),progress)
+        def progress(value): mount_update(**value)
+        result,cache=scan_folders(SOURCE,BASE/'解压材料/解压记录.sqlite',read_json(MOUNT_DIR/'hashes.json',{}),progress,methods)
         with MOUNT_LOCK:
             write_json(MOUNT_DIR/'hashes.json',cache)
             write_json(MOUNT_DIR/'result.json',dict(result,scanned_at=datetime.now().isoformat(timespec='seconds')))
-            MOUNT_STATE.update(status='ready',phase='扫描完成')
+            phase='完成（含暂不处理的加密材料）' if result.get('errors') else '完成'
+            mount_update(status='ready',phase=phase,errors=result.get('errors',[]),stages=result.get('stages',[]))
+    except PreparationError as error:
+        write_json(MOUNT_DIR/'hashes.json',error.cache)
+        write_json(MOUNT_DIR/'inventory.json',{key:error.result[key] for key in ('folders','stages','errors')})
+        mount_update(status='failed',phase=str(error),errors=error.result['errors'],stages=error.result['stages'])
     except Exception as error:
-        with MOUNT_LOCK:MOUNT_STATE.update(status='failed',phase=str(error))
+        mount_update(status='failed',phase='任务失败',errors=[dict(path=str(SOURCE),error=str(error))])
 
-def mount_view():
+
+def mount_result():
     result=read_json(MOUNT_DIR/'result.json',dict(folders=[],links=[],errors=[]))
+    for folder in result['folders']+[f for link in result['links'] for f in (link['left'],link['right'])]:
+        folder.setdefault('id',identifier('legacy:'+folder['folder']))
+        folder.setdefault('name',Path(folder['folder']).name)
+    if result.get('rule_version')!=RULE_VERSION and (MOUNT_DIR/'inventory.json').is_file():
+        inventory=read_json(MOUNT_DIR/'inventory.json')
+        result.update(folders=inventory['folders'],links=[],stages=inventory['stages'],inventory_only=True)
+    result['folders']=[folder for folder in result['folders'] if Path(folder['folder'].split('!',1)[0]).resolve().is_relative_to(SOURCE.resolve())]
+    allowed={folder['id'] for folder in result['folders']}
+    result['links']=[link for link in result['links'] if link['left']['id'] in allowed and link['right']['id'] in allowed]
     decisions=read_json(MOUNT_DIR/'decisions.json',{})
     for link in result['links']:
+        link.setdefault('evidence_count',len(link.get('evidence',[])))
         decision=decisions.get(link['id'],{})
-        link['status']=decision.get('status','pending') if decision.get('signature')==link['signature'] else 'pending'
-    state=MOUNT_STATE
-    if state['status']=='idle' and result.get('scanned_at'):state=dict(status='ready',phase='已载入上次扫描结果')
-    return dict(result,**state,source_root=str(SOURCE))
+        same=decision.get('signature')==link['signature'] and result.get('rule_version')==RULE_VERSION
+        link['status']=decision.get('status','pending') if same else ('review' if decision.get('status') in ('confirmed','rejected','review') else 'pending')
+        link['confirmation']=decision
+    return result
+
+
+
+
+def mount_search(value):
+    return json.dumps(value,ensure_ascii=False).replace('\\\\','/').casefold()
+
+
+def resolve_mount_path(raw_path):
+    raw_path=str(raw_path or '').strip()
+    if not raw_path:raise ValueError('缺少路径参数。')
+    parts=[p for p in raw_path.split('!') if p]
+    if not parts:raise ValueError('路径无效。')
+    current=Path(parts[0])
+    if len(parts)==1 and raw_path.endswith('!'):
+        extracted=current.with_name(current.name+'.解压')
+        if extracted.exists():current=extracted
+    else:
+        for member in parts[1:]:
+            extracted=current.with_name(current.name+'.解压')
+            candidate=extracted/member
+            if candidate.exists():current=candidate
+            elif (current.with_suffix('')/member).exists():current=current.with_suffix('')/member
+            elif extracted.exists():current=extracted;break
+            else:break
+    resolved=current.resolve()
+    if not any(resolved.is_relative_to(root.resolve()) for root in (SOURCE,BASE)):
+        raise ValueError('路径不在项目或数据源目录内。')
+    if not resolved.exists():raise FileNotFoundError('路径在磁盘上不存在。')
+    return resolved
+
+
+def launch_explorer(target,action='folder'):
+    if os.name=='nt':
+        if action=='open' or target.is_dir():os.startfile(str(target))
+        else:subprocess.Popen(['explorer.exe',f'/select,{target}'])
+
+
+def open_local_path(raw_path,action='folder'):
+    if action not in ('folder','select','open'):raise ValueError('操作类型无效。')
+    target=resolve_mount_path(raw_path)
+    launch_explorer(target,action)
+    return dict(opened=str(target),is_dir=target.is_dir(),action=action)
+
+
+def mount_view(params=None):
+    params=params or {}; result=mount_result(); state=dict(MOUNT_STATE)
+    if state['status']=='idle' and result.get('scanned_at'): state.update(status='ready',phase='已载入上次扫描结果')
+    historical=bool(result.get('scanned_at')) and (state['status']!='ready' or result.get('rule_version')!=RULE_VERSION)
+    query=params.get('q',[''])[0].casefold(); status=params.get('status',['all'])[0]; pair=params.get('pair',['all'])[0]
+    links=result['links']; linked={f['id'] for link in links for f in (link['left'],link['right']) if 'id' in f}
+    unlinked=[f for f in result['folders'] if f.get('id') not in linked]
+    filtered=[e for e in (unlinked if status=='unlinked' else links)
+              if (status in ('all','unlinked') or e['status']==status)
+              and (pair=='all' or (e['stage'] in pair.split('-') if status=='unlinked' else e['left']['stage']+'-'+e['right']['stage']==pair))
+              and query in mount_search(e)]
+    requested_page=max(1,int(params.get('page',['1'])[0])); pages=max(1,(len(filtered)+49)//50); page=min(requested_page,pages)
+    visible=filtered[(page-1)*50:page*50]
+    compact=lambda link:{k:v for k,v in link.items() if k!='evidence'}
+    chains=[]
+    outgoing={}
+    for link in links:
+        if link['status']=='confirmed': outgoing.setdefault(link['left'].get('id'),[]).append(link)
+    def chain(path):
+        if len(chains)>=200: return
+        children=outgoing.get(path[-1]['right'].get('id'),[])
+        if len(path)>1: chains.append([path[0]['left']]+[e['right'] for e in path])
+        for child in children: chain(path+[child])
+    for group in outgoing.values():
+        for link in group: chain([link])
+    response=dict(status=state['status'],phase=state['phase'],processed=state.get('processed',0),total=state.get('total',0),current_stage=state.get('current_stage',''),current_archive=state.get('current_archive',''),current_member=state.get('current_member',''),
+                source_root=str(SOURCE),stage_config=[dict(stage_id=s,name=n) for s,n in STAGES],stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
+                links=[compact(e) for e in visible] if status!='unlinked' else [],unlinked=visible if status=='unlinked' else [],
+                errors=state.get('errors',result.get('errors',[])),historical=historical,scanned_at=result.get('scanned_at'),
+                summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked)),
+                page=page,pages=pages,count=len(filtered),chains=chains,chains_truncated=len(chains)>=200)
+    if params.get('view',[''])[0]=='projects':
+        rows=project_rows(result)
+        chosen=[row for row in rows if (status=='all' or row['status']==status)
+                and (pair=='all' or bool(row['stages'].get(pair))) and query in mount_search(row)]
+        pages=max(1,(len(chosen)+49)//50); page=min(requested_page,pages)
+        response.update(rows=chosen[(page-1)*50:page*50],page=page,pages=pages,count=len(chosen),inventory_only=result.get('inventory_only',False))
+        response['summary'].update(projects=len(rows),project_confirmed=sum(r['status']=='confirmed' for r in rows),project_pending=sum(r['status']=='pending' for r in rows),project_review=sum(r['status']=='review' for r in rows),project_unlinked=sum(r['status']=='unlinked' for r in rows),project_unscanned=sum(r['status']=='unscanned' for r in rows))
+    return response
+
 
 POOL=ThreadPoolExecutor(max_workers=1)
 STATS_POOL=ThreadPoolExecutor(max_workers=8)
@@ -171,7 +288,30 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parts=urlsplit(self.path).path.strip('/').split('/')
             if parts==['api','folder-mount']:
-                with MOUNT_LOCK:return self.json(mount_view())
+                with MOUNT_LOCK:return self.json(mount_view(parse_qs(urlsplit(self.path).query)))
+            if parts==['api','folder-mount','file']:
+                params=parse_qs(urlsplit(self.path).query)
+                target=resolve_mount_path(params.get('path',[''])[0])
+                if not target.is_file():raise FileNotFoundError('目标不是可预览的文件。')
+                download=params.get('download',['0'])[0]=='1'
+                if not download and target.suffix.lower() in ('.txt','.csv','.json','.md','.xml','.prj','.cpg','.log') and target.stat().st_size<=5*1024*1024:
+                    raw=target.read_bytes()
+                    try:text=raw.decode('utf-8-sig')
+                    except UnicodeDecodeError:text=raw.decode('gb18030',errors='replace')
+                    body=text.encode('utf-8')
+                    self.send_response(200);self.send_header('Content-Type','text/plain; charset=utf-8')
+                    self.send_header('Content-Length',str(len(body)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(body)
+                    return
+                return self.file(target,download=download,large_download=True)
+            if len(parts)==4 and parts[:3]==['api','folder-mount','links']:
+                with MOUNT_LOCK:
+                    link=next((e for e in mount_result()['links'] if e['id']==parts[3]),None)
+                    if not link: raise FileNotFoundError('目录关系不存在。')
+                    params=parse_qs(urlsplit(self.path).query); page=max(1,int(params.get('page',['1'])[0]))
+                    query=params.get('q',[''])[0].casefold()
+                    evidence=[e for e in link.get('evidence',[]) if query in mount_search(e)]
+                    pages=max(1,(len(evidence)+19)//20); page=min(page,pages)
+                    return self.json(dict(id=link['id'],signature=link['signature'],confirmation=link.get('confirmation'),evidence=evidence[(page-1)*20:page*20],page=page,pages=pages,count=len(evidence)))
             if parts==['api','storage']:
                 params=parse_qs(urlsplit(self.path).query)
                 return self.json(storage_info(BASE,SOURCE,params.get('kind',['archive'])[0],params.get('q',[''])[0],int(params.get('page',['1'])[0])))
@@ -261,22 +401,30 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if origin and origin!=f'http://{self.headers.get("Host")}':return self.json({'error':'不接受其他网页发起的操作。'},403)
             parts=urlsplit(self.path).path.strip('/').split('/')
+            if parts==['api','folder-mount','open-path']:
+                payload=json.loads(self.body(65536))
+                return self.json(open_local_path(payload.get('path',''),payload.get('action','folder')))
             if parts==['api','folder-mount','scan']:
+                payload=json.loads(self.body(65536)); validate_methods(payload.get('methods'))
                 with MOUNT_LOCK:
                     if MOUNT_STATE['status']=='running':raise ValueError('正在扫描，请等待完成。')
-                    MOUNT_STATE.update(status='running',phase='正在盘点各阶段文件夹')
-                    MOUNT_POOL.submit(mount_scan)
+                    mount_update(status='running',phase='扫描目录',errors=[],stages=[],current_archive='',current_member='',processed=0,total=0)
+                    MOUNT_POOL.submit(mount_scan,payload['methods'])
                     return self.json(MOUNT_STATE,202)
             if parts==['api','folder-mount','decision']:
                 payload=json.loads(self.body(65536))
                 with MOUNT_LOCK:
                     if MOUNT_STATE['status']=='running':raise ValueError('扫描完成后再确认关系。')
-                    link=next((x for x in mount_view()['links'] if x['id']==payload.get('id')),None)
+                    if mount_view()['historical']: raise ValueError('当前为历史结果，成功扫描后才能确认关系。')
+                    link=next((x for x in mount_result()['links'] if x['id']==payload.get('id')),None)
                     if not link or link['signature']!=payload.get('signature'):raise ValueError('关联证据已变化，请刷新后重新核对。')
                     status=payload.get('status')
-                    if status not in ('pending','confirmed','rejected'):raise ValueError('关联状态无效。')
+                    if status not in ('pending','confirmed','rejected','review'):raise ValueError('关联状态无效。')
                     decisions=read_json(MOUNT_DIR/'decisions.json',{})
-                    decisions[link['id']]=dict(status=status,signature=link['signature'],updated_at=datetime.now().isoformat(timespec='seconds'))
+                    previous=decisions.get(link['id'],{})
+                    history=previous.get('history',[])
+                    if previous: history=history+[{k:v for k,v in previous.items() if k!='history'}]
+                    decisions[link['id']]=dict(status=status,signature=link['signature'],rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
                     write_json(MOUNT_DIR/'decisions.json',decisions)
                     return self.json(mount_view())
             if parts in (['api','jobs'],['api','current']):

@@ -4,11 +4,12 @@ import struct
 import zipfile
 import sqlite3
 from contextlib import closing
+from functools import lru_cache
 from pathlib import Path
 import openpyxl
 from extract_archives import RecordedZip,OUTPUT
 
-ROOT = Path(r'F:\项目数据\赣江一张图')
+from source_config import SOURCE as ROOT
 OUT = Path('work'); OUT.mkdir(exist_ok=True)
 
 
@@ -16,21 +17,30 @@ def is_office_lock(path):
     return Path(path).name.startswith('~$')
 
 
-def extracted_files(database,root):
+def extracted_files(database,root,active=None):
     if not database.is_file():return []
+    root=Path(root).resolve()
+    @lru_cache(maxsize=None)
+    def canonical(path): return str(Path(path).resolve())
     with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro',uri=True)) as db:
         rows=db.execute("SELECT archive,raw,dest,dsize,dmtime FROM files WHERE status='done'").fetchall()
-    parents={str(Path(dest).resolve()):(archive,raw) for archive,raw,dest,_,_ in rows if dest}
+        names={}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='archives'").fetchone():
+            for archive,members in db.execute('SELECT path,members FROM archives'):
+                names.update({(archive,m['raw']):m['name'] for m in json.loads(members)})
+    if active is not None: rows=[r for r in rows if (canonical(r[0]),r[1]) in active]
+    parents={canonical(dest):(archive,raw) for archive,raw,dest,_,_ in rows if dest and Path(dest).suffix.lower() in ('.zip','.rar','.7z')}
     def label(archive,raw,seen=()):
-        key=str(Path(archive).resolve())
+        key=canonical(archive)
+        name=names.get((key,raw),raw).replace('\\','/')
         if key in seen:raise ValueError('解压索引存在循环引用')
         if key in parents:
-            parent,member=parents[key];return label(parent,member,(*seen,key))+'!'+raw
-        return str(Path(archive))+'!'+raw
+            parent,member=parents[key];return label(parent,member,(*seen,key))+'!'+name
+        return str(Path(archive))+'!'+name
     result=[]
     for archive,raw,dest,size,mtime in rows:
         path=Path(dest)
-        if not path.is_file():continue
+        if not path.is_file() or (active is not None and not Path(canonical(str(path))).is_relative_to(root)):continue
         stat=path.stat()
         if (stat.st_size,stat.st_mtime_ns)!=(size,mtime):continue
         source=label(archive,raw);origin=Path(source.split('!',1)[0])

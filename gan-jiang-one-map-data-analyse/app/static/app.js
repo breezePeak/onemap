@@ -77,7 +77,7 @@ async function loadStorageTab(box){
   const explanation=node('div',undefined,'storage-explanation');
   explanation.append(node('h3','当前存储方式：磁盘文件 + 共享解压索引 + JSON 处理结果'),node('p','没有为每个原始文件建立独立数据库，也没有把所有文件内容存入业务数据库。SQLite 只登记压缩包和成员的解压信息；登记成功不代表 OCR、字段提取或业务入库完成。'));
   for(const [label,path] of [['原始材料目录',data.source_root],['共享解压数据库',data.database],['文件盘点快照',data.inventory],['识别缓存与提取结果（JSON、图片等）',data.work],['各任务的候选、人工选择与来源（review.json 等）',data.jobs],['治理成果（Excel、JSON、ZIP 等）',data.outputs]]){
-    const line=node('div');line.append(node('strong',label+'：'),node('span',path,'manager-path'));explanation.append(line);
+    const pNode=node('span',path,'manager-path clickable-path');pNode.title='点击在 Windows 资源管理器中打开：'+path;pNode.onclick=()=>openWindowsPath(path,'folder');const line=node('div');line.append(node('strong',label+'：'),pNode);explanation.append(line);
   }
   explanation.append(node('p',`共享数据库：${data.database_exists?'已存在':'尚未生成'} · 成功记录 ${data.counts.done||0} · 失败记录 ${data.counts.failed||0} · 文件盘点 ${data.inventory_count} 条。以下“磁盘状态”在本次查询时检查文件是否存在，未重新校验内容或识别完整性。`));
   const controls=node('form',undefined,'storage-controls'),kind=node('select'),search=node('input'),submit=node('button','搜索','secondary');
@@ -92,8 +92,8 @@ async function loadStorageTab(box){
   const table=node('table',undefined,'manager-table storage-table'),thead=node('thead'),head=node('tr'),body=node('tbody');
   for(const label of ['原始文件 / 压缩包成员','实际保存路径','登记位置','登记状态 / 磁盘状态'])head.append(node('th',label));thead.append(head);table.append(thead);
   for(const entry of data.entries){
-    const tr=node('tr');tr.append(node('td',entry.source,'manager-path'));
-    const destination=node('td');destination.append(node('div',entry.dest||'无保存路径','manager-path'),node('small',`${entry.location} · ${formatSize(entry.size)}`));
+    const tr=node('tr'),srcTd=node('td',entry.source,'manager-path clickable-path');srcTd.title='点击在 Windows 资源管理器中打开：'+entry.source;srcTd.onclick=()=>openWindowsPath(entry.source,'select');tr.append(srcTd);
+    const destination=node('td'),destDiv=node('div',entry.dest||'无保存路径',entry.dest?'manager-path clickable-path':'manager-path');if(entry.dest){destDiv.title='点击在 Windows 资源管理器中打开：'+entry.dest;destDiv.onclick=()=>openWindowsPath(entry.dest,'select');}destination.append(destDiv,node('small',`${entry.location} · ${formatSize(entry.size)}`));
     if(entry.dest){const copy=node('button','复制路径','text-button manager-copy');copy.onclick=()=>copyDirectoryPath(entry.dest);destination.append(copy);}tr.append(destination,node('td',entry.record));
     const status=node('td');status.append(node('div',({done:'解压登记成功',failed:'解压失败',snapshot:'已盘点（快照）'})[entry.status]||entry.status),node('div',entry.exists?'磁盘文件存在':'磁盘文件不存在或不可访问',entry.exists?'status-ready':'status-failed'));
     if(entry.error)status.append(node('div',entry.error,'status-failed'));tr.append(status);body.append(tr);
@@ -122,7 +122,7 @@ async function loadDataFilesTab(box){
     const tr=node('tr');
     const nameCell=node('td');nameCell.append(node('div',entry.name,'manager-filename'),node('div',entry.note||'','manager-note'));tr.append(nameCell);
     tr.append(node('td',entry.is_dir?'目录':'文件'));
-    const dirCell=node('td'),path=node('div',entry.path,'manager-path');path.title=entry.path;
+    const dirCell=node('td'),path=node('div',entry.path,'manager-path clickable-path');path.title='点击在 Windows 资源管理器中打开：'+entry.path;path.onclick=()=>openWindowsPath(entry.path,'folder');
     const copy=node('button','复制路径','text-button manager-copy');copy.onclick=()=>copyDirectoryPath(entry.path);
     dirCell.append(path,copy);tr.append(dirCell);
     tr.append(node('td',formatSize(entry.size_bytes)));
@@ -155,7 +155,7 @@ async function loadJobsTab(box){
     const fileCell=node('td');fileCell.append(node('div',j.filename||'未命名文件','manager-filename'),node('div',j.id,'manager-job-id'));tr.append(fileCell);
     tr.append(node('td',managerStatusNames[j.status]||j.status||'—',`manager-status status-${j.status}`));
     tr.append(node('td',(j.created_at||'—').replace('T',' ')));
-    const dirCell=node('td'),path=node('div',j.directory||'—','manager-path');path.title=j.directory||'';
+    const dirCell=node('td'),path=node('div',j.directory||'—',j.directory?'manager-path clickable-path':'manager-path');path.title=j.directory?'点击在 Windows 资源管理器中打开：'+j.directory:'';if(j.directory)path.onclick=()=>openWindowsPath(j.directory,'folder');
     const copy=node('button','复制路径','text-button manager-copy');copy.onclick=()=>copyDirectoryPath(j.directory);dirCell.append(path,copy);tr.append(dirCell);
     tr.append(node('td',formatSize(j.size_bytes)));
     tr.append(node('td',j.file_count??'—'));
@@ -172,6 +172,13 @@ function switchManagerTab(tab){
   $('tabDataFiles').classList.toggle('active',tab==='datafiles');
   $('tabJobs').classList.toggle('active',tab==='jobs');
   loadJobManager();
+}
+async function openWindowsPath(path,action='folder'){
+  if(!path||path==='—'||path==='无保存路径')return;
+  try{
+    const res=await api('/api/folder-mount/open-path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,action})});
+    notify(action==='open'?`已调用本机程序打开：${res.opened}`:`已在 Windows 资源管理器打开：${res.opened}`);
+  }catch(e){notify(e.message,true);}
 }
 function copyDirectoryPath(path){
   if(!path)return;
