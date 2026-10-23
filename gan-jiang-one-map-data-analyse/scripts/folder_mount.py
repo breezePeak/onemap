@@ -96,7 +96,7 @@ def material_detail(entry):
     return {key: entry[key] for key in ('id', 'logical_path', 'physical_path', 'archive_chain', 'validation', 'small_dir')}
 
 
-def scan_folders(root, database, cache, progress, methods=None, storage_dir=None):
+def scan_folders(root, database, cache, progress, methods=None, storage_dir=None, tolerate_corrupted=False):
     validate_methods(['M2'] if methods is None else methods)
     root = Path(root).resolve(); database = Path(database)
     if not root.is_dir():
@@ -308,7 +308,14 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             except OSError as value:
                 errors.append(dict(path=path, error=str(value)))
 
-        if any(e.get('error') != '加密成员，未提供密码' for e in errors):
+        tolerate = tolerate_corrupted or os.environ.get('ONEMAP_TOLERATE_CORRUPTED', '').lower() in ('1', 'true')
+        blocking_errors = [
+            e for e in errors
+            if e.get('error') != '加密成员，未提供密码' and (
+                not tolerate or '版本发生变化' in e.get('error', '') or '超出' in e.get('error', '')
+            )
+        ]
+        if blocking_errors:
             raise PreparationError(result, updated)
 
         # 第五步：M2 相同附件精确匹配与项目大目录聚合挂接（支持 7 阶段任意两两匹配，最多21组）

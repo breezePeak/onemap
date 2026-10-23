@@ -59,11 +59,14 @@ def run_pipeline(source=SOURCE, methods=None, verbose=True):
             cache=hash_cache,
             progress=on_progress,
             methods=['M2'] if methods is None else methods,
-            storage_dir=mount_dir
+            storage_dir=mount_dir,
+            tolerate_corrupted=True
         )
         (mount_dir / 'hashes.json').write_text(json.dumps(cache, ensure_ascii=False), encoding='utf-8')
         result_payload = dict(result, scanned_at=datetime.now().isoformat(timespec='seconds'))
         (mount_dir / 'result.json').write_text(json.dumps(result_payload, ensure_ascii=False, indent=2), encoding='utf-8')
+        task_payload = dict(status='ready', phase='完成（含个别损坏/加密材料）' if result.get('errors') else '完成', errors=result.get('errors', []), stages=result.get('stages', []))
+        (mount_dir / 'task.json').write_text(json.dumps(task_payload, ensure_ascii=False, indent=2), encoding='utf-8')
 
         catalog = ProjectCatalog(storage_dir=mount_dir, root=source)
         print("\n=== 执行成功 ===")
