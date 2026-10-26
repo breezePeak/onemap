@@ -178,6 +178,7 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
         summary['failed'] += 1
 
     try:
+        catalog.ensure_agent_decisions_applied()
         # 第一步：扫描 7 个阶段目录
         for stage_id, name in STAGES:
             summary = dict(stage_id=stage_id, name=name, business_directories=0, archives=0, reused=0, extracted=0, failed=0, valid_materials=0, skipped={})

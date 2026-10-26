@@ -17,7 +17,7 @@ from project_catalog import ProjectCatalog
 from organize_independent_documents import organize_independent_documents
 
 
-def run_pipeline(source=SOURCE, methods=None, verbose=True):
+def run_pipeline(source=SOURCE, methods=None, verbose=True, require_agent=True):
     methods = ['M2'] if methods is None else methods
     validate_methods(methods)
     validation = validate_source_stages(source)
@@ -28,6 +28,21 @@ def run_pipeline(source=SOURCE, methods=None, verbose=True):
     db_path = BASE / '解压材料/解压记录.sqlite'
     mount_dir = BASE / 'work/folder_mount'
     mount_dir.mkdir(parents=True, exist_ok=True)
+
+    # 第一步至第四步前置闭环：确保 Agent 已对复杂目录完成语义判断并校验入库，禁止普通规则冒充 Agent 研判
+    pre_catalog = ProjectCatalog(storage_dir=mount_dir, root=source)
+    try:
+        pre_catalog.ensure_agent_decisions_applied()
+        pending_complex = pre_catalog.find_pending_complex_directories()
+        if require_agent and pending_complex:
+            sample = ', '.join(f"{x['stage_id']}:{x['rel_path']}" for x in pending_complex[:8])
+            raise RuntimeError(
+                f"发现 {len(pending_complex)} 个复杂/多项目目录尚未经过 Agent 语义判断入库（示例: {sample}）。"
+                "请先按 onemap-stage-mount Skill 执行 project_catalog.py inspect-tree / inspect-node / apply-decisions 完成 Agent 边界研判，禁止用普通规则扫描结果冒充 Agent 智能研判。"
+            )
+    finally:
+        pre_catalog.close()
+
     hash_cache = {}
     if (mount_dir / 'hashes.json').is_file():
         try:

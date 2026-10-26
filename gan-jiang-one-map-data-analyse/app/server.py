@@ -1,4 +1,4 @@
-"""仅监听本机的 Excel 治理工作台。"""
+"""仅监听本机的第一阶段目录关联与冲突管理工作台（第二、三阶段业务数据生成接口已隔离禁用）。"""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -27,7 +27,16 @@ from project_codes import RULE_VERSION as M1_RULE_VERSION
 
 def get_catalog_projects():
     cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
-    try: return [p for p in cat.projects.values() if Path(p['physical_path']).is_dir() and Path(p['physical_path']).resolve().is_relative_to(SOURCE.resolve())]
+    try:
+        cat.ensure_agent_decisions_applied()
+        return [p for p in cat.projects.values() if Path(p['physical_path']).is_dir() and Path(p['physical_path']).resolve().is_relative_to(SOURCE.resolve())]
+    finally: cat.close()
+
+def get_catalog_unresolved_decisions():
+    cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
+    try:
+        cat.ensure_agent_decisions_applied()
+        return [d for d in cat.decisions.values() if d.get('node_type')=='unresolved' or d.get('status') in ('review','unresolved')]
     finally: cat.close()
 
 from organize_independent_documents import organize_independent_documents
@@ -104,8 +113,6 @@ def mount_result():
     return result
 
 
-
-
 def mount_search(value):
     return json.dumps(value,ensure_ascii=False).replace('\\\\','/').casefold()
 
@@ -147,13 +154,260 @@ def open_local_path(raw_path,action='folder'):
     return dict(opened=str(target),is_dir=target.is_dir(),action=action)
 
 
+def _match_method_filter(link, method):
+    methods = link.get('methods', [link.get('method', 'M2')])
+    if method == 'all':
+        return True
+    if method == 'M1+M2':
+        return 'M1' in methods and 'M2' in methods
+    return method in methods
+
+
+CONFLICT_TYPE_LABELS = {
+    'm1_m2_conflict': 'M1和M2证据矛盾',
+    'unresolved_ownership': '项目代码归属不明',
+    'multi_parcel_same_code': '相同代码涉及多个宗地',
+    'boundary_review': '项目文件夹边界存在疑问',
+    'shared_attachment': '多个目录共用相同附件',
+    'stale_confirmation': '已确认关系因新证据变化需复核',
+}
+
+
+def classify_link_conflicts(link, folder_map):
+    types = []
+    reasons = []
+    methods = link.get('methods', [link.get('method', 'M2')])
+    m1_val = link.get('m1_validation') or {}
+    left_f = folder_map.get(link['left'].get('id'), link['left'])
+    right_f = folder_map.get(link['right'].get('id'), link['right'])
+
+    # 1. M1 和 M2 证据矛盾
+    if link.get('conflict') or m1_val.get('state') == 'conflict':
+        types.append('m1_m2_conflict')
+        reasons.append(m1_val.get('reason') or 'M1 项目代码证据与 M2 相同附件证据指向不一致，存在跨阶段证据矛盾。')
+
+    # 2. 项目代码归属不明
+    if m1_val.get('state') == 'unresolved_ownership':
+        types.append('unresolved_ownership')
+        reasons.append(m1_val.get('reason') or '目录材料中发现多个项目代码，代码归属尚不明确。')
+
+    # 3. 相同代码涉及多个宗地
+    if link.get('ambiguous') and 'M1' in methods:
+        types.append('multi_parcel_same_code')
+        reasons.append(m1_val.get('reason') or '同一项目代码在同一阶段命中多个候选宗地/项目目录（一对多或多对多），不能仅凭代码合并宗地。')
+
+    # 4. 多个目录共用相同附件
+    if link.get('ambiguous') and 'M2' in methods:
+        types.append('shared_attachment')
+        reasons.append('同一阶段内多个项目目录共用完全相同的附件（SHA-256 相同），需人工甄别真实归属。')
+
+    # 5. 项目文件夹边界存在疑问
+    if left_f.get('boundary_review') or right_f.get('boundary_review'):
+        types.append('boundary_review')
+        b_reasons = [f"{side['stage']}「{side['name']}」: {side.get('boundary_review_reason') or side.get('reason') or '目录边界存疑'}"
+                     for side in (left_f, right_f) if side.get('boundary_review')]
+        reasons.append('；'.join(b_reasons) or '关联双方中存在项目文件夹边界疑问，需复核目录边界。')
+
+    # 6. 已确认关系因新证据变化需要复核
+    conf = link.get('confirmation') or {}
+    if conf and conf.get('status') in ('confirmed', 'rejected', 'review'):
+        sig_changed = conf.get('signature') != link.get('signature')
+        ctx_changed = bool(conf.get('review_context')) and conf.get('review_context') != link.get('review_context')
+        if sig_changed or ctx_changed:
+            types.append('stale_confirmation')
+            reasons.append(f"原人工决定（{conf.get('status')}，版本 {str(conf.get('signature', ''))[:10]}）因底层证据或上下文更新已失效，需重新复核。")
+
+    return types, reasons
+
+
+def mount_conflicts(params=None):
+    params = params or {}
+    result = mount_result()
+    projects = get_catalog_projects()
+    unresolved_decisions = get_catalog_unresolved_decisions()
+    folder_map = {f['id']: dict(f) for f in result.get('folders', [])}
+    for p in projects:
+        if p['id'] in folder_map:
+            if p.get('boundary_review') or p.get('status') == 'review':
+                folder_map[p['id']]['boundary_review'] = True
+                folder_map[p['id']]['boundary_review_reason'] = p.get('boundary_review_reason') or p.get('reason', '')
+
+    conflict_type = params.get('conflict_type', ['all'])[0]
+    stage = params.get('stage', ['all'])[0]
+    status = params.get('status', ['all'])[0]
+    method = params.get('method', ['all'])[0]
+    query = params.get('q', [''])[0].casefold()
+
+    items = []
+    counts = {k: 0 for k in CONFLICT_TYPE_LABELS}
+
+    # A. 关联关系中的冲突、歧义、代码归属不明、边界复核、历史决定失效与审核记录
+    for link in result.get('links', []):
+        c_types, c_reasons = classify_link_conflicts(link, folder_map)
+        has_history = bool((link.get('confirmation') or {}).get('history') or (link.get('confirmation') or {}).get('status'))
+        if not c_types and link.get('status') != 'review' and not has_history:
+            continue
+        if not c_types and link.get('status') == 'review':
+            c_types = ['boundary_review']
+            c_reasons = ['该候选关联被标记为待人工复核。']
+        for ct in c_types:
+            counts[ct] = counts.get(ct, 0) + 1
+
+        compact_link = {k: v for k, v in link.items() if k not in ('evidence', 'method_evidence')}
+        item = dict(
+            item_type='link',
+            id=link['id'],
+            conflict_types=c_types,
+            conflict_labels=[CONFLICT_TYPE_LABELS.get(t, t) for t in c_types],
+            conflict_reasons=c_reasons,
+            status=link['status'],
+            methods=link.get('methods', [link.get('method', 'M2')]),
+            pair=f"{link['left']['stage']}-{link['right']['stage']}",
+            stages=[link['left']['stage'], link['right']['stage']],
+            left=link['left'],
+            right=link['right'],
+            signature=link['signature'],
+            evidence_count=link.get('evidence_count', len(link.get('evidence', []))),
+            m1_validation=link.get('m1_validation'),
+            confirmation=link.get('confirmation') or {},
+            link=compact_link,
+        )
+        items.append(item)
+
+    # B. 目录边界存在疑问的项目或未决目录（独立展示）
+    seen_boundary_dirs = set()
+    for p in projects:
+        if p.get('boundary_review') or p.get('status') in ('review', 'unresolved'):
+            seen_boundary_dirs.add(p['id'])
+            counts['boundary_review'] += 1
+            items.append(dict(
+                item_type='directory',
+                id=p['id'],
+                conflict_types=['boundary_review'],
+                conflict_labels=[CONFLICT_TYPE_LABELS['boundary_review']],
+                conflict_reasons=[p.get('boundary_review_reason') or p.get('reason') or '项目文件夹边界存在疑问，需人工复核'],
+                status=p.get('status', 'review'),
+                methods=[],
+                pair=p['stage_id'],
+                stages=[p['stage_id']],
+                directory=dict(
+                    id=p['id'],
+                    stage=p['stage_id'],
+                    stage_name=p.get('stage_name', ''),
+                    name=p['project_name'],
+                    project_root=p['project_root'],
+                    folder=p['physical_path'],
+                    decision_source=p.get('decision_source', 'agent'),
+                    reason=p.get('boundary_review_reason') or p.get('reason', ''),
+                    evidence_paths=p.get('evidence_paths', []),
+                ),
+                confirmation={},
+            ))
+    for d in unresolved_decisions:
+        if d['id'] in seen_boundary_dirs:
+            continue
+        counts['boundary_review'] += 1
+        items.append(dict(
+            item_type='directory',
+            id=d['id'],
+            conflict_types=['boundary_review'],
+            conflict_labels=[CONFLICT_TYPE_LABELS['boundary_review']],
+            conflict_reasons=[d.get('reason') or '证据不足，目录边界暂无法确定（unresolved）'],
+            status=d.get('status', 'review'),
+            methods=[],
+            pair=d['stage_id'],
+            stages=[d['stage_id']],
+            directory=dict(
+                id=d['id'],
+                stage=d['stage_id'],
+                stage_name=STAGE_TITLES.get(d['stage_id'], d['stage_id']),
+                name=d.get('project_name') or d['rel_path'].split('/')[-1],
+                project_root=d['rel_path'],
+                folder=d['physical_path'],
+                decision_source=d.get('decision_source', 'agent'),
+                node_type=d.get('node_type', 'unresolved'),
+                reason=d.get('reason', ''),
+                evidence_paths=d.get('evidence_paths', []),
+            ),
+            confirmation={},
+        ))
+
+    # C. 项目代码归属不明的目录证据（按目录聚合展示）
+    unresolved_by_dir = {}
+    for ev in result.get('project_code_index', []):
+        if ev.get('ownership_status') == 'unresolved_ownership' or ev.get('needs_review'):
+            unresolved_by_dir.setdefault(ev['directory_id'], []).append(ev)
+    for dir_id, ev_list in unresolved_by_dir.items():
+        f_obj = folder_map.get(dir_id)
+        if not f_obj:
+            continue
+        counts['unresolved_ownership'] += 1
+        codes = sorted({e['canonical_code'] for e in ev_list if e.get('canonical_code')})
+        items.append(dict(
+            item_type='code_ownership',
+            id=f'code:{dir_id}',
+            conflict_types=['unresolved_ownership'],
+            conflict_labels=[CONFLICT_TYPE_LABELS['unresolved_ownership']],
+            conflict_reasons=[ev_list[0].get('reason') or f"该目录内材料提取到多个不同项目代码（{', '.join(codes)}），代码归属不明。"],
+            status='review',
+            methods=['M1'],
+            pair=f_obj['stage'],
+            stages=[f_obj['stage']],
+            directory=f_obj,
+            codes=codes,
+            evidence_sample=ev_list[:10],
+            evidence_count=len(ev_list),
+            confirmation={},
+        ))
+
+    def match_item(it):
+        if conflict_type != 'all':
+            if conflict_type == 'audited':
+                if not (it.get('confirmation') or {}).get('status') and not (it.get('confirmation') or {}).get('history'):
+                    return False
+            elif conflict_type not in it.get('conflict_types', []):
+                return False
+        if stage != 'all':
+            if '-' in stage:
+                if it.get('pair') != stage:
+                    return False
+            elif stage not in it.get('stages', []):
+                return False
+        if status != 'all' and it.get('status') != status:
+            return False
+        if method != 'all':
+            if it['item_type'] != 'link' or not _match_method_filter(it, method):
+                return False
+        if query and query not in mount_search(it):
+            return False
+        return True
+
+    filtered = [it for it in items if match_item(it)]
+    requested_page = max(1, int(params.get('page', ['1'])[0]))
+    pages = max(1, (len(filtered) + 29) // 30)
+    page = min(requested_page, pages)
+    visible = filtered[(page - 1) * 30:page * 30]
+
+    audited_count = sum(1 for it in items if (it.get('confirmation') or {}).get('status') or (it.get('confirmation') or {}).get('history'))
+    return dict(
+        items=visible,
+        count=len(filtered),
+        total_items=len(items),
+        page=page,
+        pages=pages,
+        counts=dict(counts, audited=audited_count),
+        labels=CONFLICT_TYPE_LABELS,
+    )
+
+
 def mount_view(params=None):
     params=params or {}; result=mount_result(); state=dict(MOUNT_STATE)
-    if state['status']=='idle' and result.get('scanned_at'): state.update(status='ready',phase='已载入上次扫描结果')
+    if state['status']=='idle' and result.get('scanned_at'):
+        state.update(status='ready',phase='已载入 Skill 扫描关联结果')
     historical=bool(result.get('scanned_at')) and (state['status']!='ready' or result.get('rule_version')!=RULE_VERSION
                or 'M1' in result.get('methods',[]) and result.get('m1_rule_version')!=M1_RULE_VERSION)
     query=params.get('q',[''])[0].casefold(); status=params.get('status',['all'])[0]; pair=params.get('pair',['all'])[0]; method=params.get('method',['all'])[0]
-    links=[e for e in result['links'] if method=='all' or method in e.get('methods',[e.get('method','M2')])]
+    links=[e for e in result['links'] if _match_method_filter(e, method)]
     result=dict(result,links=links)
     linked={f['id'] for link in links if link['status']!='rejected' for f in (link['left'],link['right']) if 'id' in f}
     unlinked=[f for f in result['folders'] if f.get('kind')!='ungrouped' and f.get('id') not in linked]
@@ -179,7 +433,8 @@ def mount_view(params=None):
                 source_root=str(SOURCE),stage_config=[dict(stage_id=s,name=n,title=STAGE_TITLES.get(s,n)) for s,n in STAGES],projects=get_catalog_projects(),stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
                 links=[compact(e) for e in visible] if status!='unlinked' else [],unlinked=visible if status=='unlinked' else [],
                 errors=state.get('errors',result.get('errors',[])),historical=historical,scanned_at=result.get('scanned_at'),
-                summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked)),
+                summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked),
+                             conflicts=sum(1 for e in links if e.get('conflict') or e.get('ambiguous') or (e.get('m1_validation') or {}).get('state') in ('conflict','unresolved_ownership'))),
                 page=page,pages=pages,count=len(filtered),chains=chains,chains_truncated=len(chains)>=200)
     response.update(methods=result.get('methods',['M2']),m1_statistics=result.get('m1_statistics'),skip_statistics=result.get('skip_statistics'))
     if params.get('view',[''])[0]=='projects':
@@ -193,6 +448,7 @@ def mount_view(params=None):
     return response
 
 
+# 以下为第二、三阶段预留底层能力（第一阶段已隔离，不对外暴露 HTTP 接口）
 POOL=ThreadPoolExecutor(max_workers=1)
 STATS_POOL=ThreadPoolExecutor(max_workers=8)
 LOCKS={}
@@ -268,6 +524,15 @@ def job_path(ident):
 def update(job,**changes):
     state=read_json(job/'meta.json',{});state.update(changes);write_json(job/'meta.json',state)
 
+def rerun_isolated_job(ident):
+    """隔离的第二/三阶段任务重跑内部辅助函数（第一阶段 HTTP 接口已禁用）。"""
+    job=job_path(ident);lock=LOCKS.setdefault(ident,threading.RLock())
+    with lock:
+        if read_json(job/'meta.json')['status'] not in ('ready','failed'):
+            raise ValueError('任务正在处理，请等待当前处理结束。')
+        update(job,status='queued',phase='重新检索当前任务',progress=0,error=None)
+        POOL.submit(execute,job)
+        return {'id':ident}
 
 def execute(job):
     steps=[('inspect_sources.py','盘点数据源'),('extract_materials.py','优先读取供应扫描件'),('extract_pdfs.py','各阶段材料全文检索（不限路径命中）'),('render_pdfs.mjs','渲染 PDF 页面'),('ocr_images.ps1','本机 OCR（已有文字自动复用）'),('vector_outputs.py','读取附件SHP/CAD及转换坐标'),('spatial_matches.py','计算空间挂接'),('extract_fields.py','提取字段及多项目候选'),('expand_materials.py','利用新标识和附件指纹继续跨阶段检索'),('link_stages.py','编号、附件与模糊挂接'),('build_patches.py','建立回填及冲突清单'),('governance_outputs.py','整理阶段材料、选址信息及补建项目')]
@@ -290,6 +555,10 @@ def refresh_matching(job):
         collect_review(job);run_step(job,'governance_outputs.py')
         update(job,status='ready',phase='匹配已根据人工证据更新',progress=100)
     except Exception as error:update(job,status='failed',phase='重算失败',error=str(error))
+
+
+STAGE1_DISABLED_MSG = '第一阶段仅开放目录关联与冲突管理功能，业务数据自动生产、Excel制表与前端触发扫描接口已禁用。'
+
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self,fmt,*args):print(fmt%args,flush=True)
@@ -318,6 +587,8 @@ class Handler(BaseHTTPRequestHandler):
             parts=urlsplit(self.path).path.strip('/').split('/')
             if parts==['api','folder-mount']:
                 with MOUNT_LOCK:return self.json(mount_view(parse_qs(urlsplit(self.path).query)))
+            if parts==['api','folder-mount','conflicts']:
+                with MOUNT_LOCK:return self.json(mount_conflicts(parse_qs(urlsplit(self.path).query)))
             if parts==['api','folder-mount','projects']:
                 with MOUNT_LOCK:
                     projs=get_catalog_projects()
@@ -356,57 +627,9 @@ class Handler(BaseHTTPRequestHandler):
                     evidence=[e for e in link.get('evidence',[]) if query in mount_search(e) and (method=='all' or e.get('method','M2')==method)]
                     pages=max(1,(len(evidence)+19)//20); page=min(page,pages)
                     return self.json(dict(id=link['id'],signature=link['signature'],confirmation=link.get('confirmation'),evidence=evidence[(page-1)*20:page*20],page=page,pages=pages,count=len(evidence)))
-            if parts==['api','storage']:
-                params=parse_qs(urlsplit(self.path).query)
-                return self.json(storage_info(BASE,SOURCE,params.get('kind',['archive'])[0],params.get('q',[''])[0],int(params.get('page',['1'])[0])))
-            if parts==['api','jobs']:
-                jobs=[dict(id=p.parent.name,**read_json(p,{})) for p in JOBS.glob('*/meta.json')]
-                return self.json(sorted(jobs,key=lambda x:x.get('created_at',''),reverse=True))
-            if parts==['api','jobs','stats']:
-                metas=[(p.parent.name,read_json(p,{})) for p in JOBS.glob('*/meta.json')]
-                metas.sort(key=lambda x:x[1].get('created_at',''),reverse=True)
-                futures=[(ident,meta,STATS_POOL.submit(entry_info,JOBS/ident)) for ident,meta in metas]
-                jobs=[]
-                for ident,meta,future in futures:
-                    try:info=future.result(timeout=60)
-                    except Exception:info=dict(is_dir=True,size_bytes=0,file_count=0,modified=None)
-                    jobs.append(dict(id=ident,directory=str((JOBS/ident).resolve()),**meta,**info))
-                return self.json(jobs)
-            if parts==['api','datafiles']:
-                entries,total=datafile_entries()
-                return self.json({'entries':entries,'total_bytes':total})
-            if len(parts)>=3 and parts[:2]==['api','jobs']:
-                job=job_path(parts[2])
-                if len(parts)==3:
-                    state=read_json(job/'meta.json');log=job/'console.log'
-                    state['artifacts']=(job/'outputs/governance/治理成果.zip').is_file()
-                    if log.exists():
-                        with log.open('rb') as f:f.seek(max(0,log.stat().st_size-50000));state['logs']=f.read().decode('utf-8',errors='replace')[-30000:]
-                    return self.json(state)
-                if parts[3]=='review':
-                    review=read_json(job/'review.json')
-                    if review is None:raise ValueError('检索尚未完成。')
-                    review['spatial_projects']=[str(r['project']) for r in read_json(job/'work/spatial_matches.json',[])]
-                    return self.json(resolve_review(review))
-                if parts[3]=='spatial' and len(parts)==5:
-                    if read_json(job/'meta.json')['status']!='ready':raise ValueError('检索完成后可查看空间图。')
-                    with LOCKS.setdefault(parts[2],threading.RLock()):
-                        return self.json(spatial_preview(job,unquote(parts[4])))
-                if parts[3]=='download':return self.file(job/'outputs/governance/test_result_已填充.xlsx',True)
-                if parts[3]=='audit':return self.file(job/'outputs/governance/用户选择与来源.json')
-                if parts[3]=='log':return self.file(job/'console.log',True)
-                if parts[3]=='queue':return self.file(job/'outputs/governance/待复核队列.jsonl',True)
-                if parts[3]=='unassociated':return self.file(job/'outputs/governance/未关联材料.jsonl',True)
-                if parts[3]=='recognition':return self.file(job/'outputs/governance/材料识别统计.json',True)
-                artifacts={'bundle':'治理成果.zip','selection':'选址意见书信息提取.xlsx','new-projects':'项目表_含补建项目.xlsx','vectors':'附件矢量清单.xlsx','missing-shp':'缺少SHP项目.xlsx','mapping':'监管号与单元号映射.xlsx','materials':'阶段材料清单.xlsx','results':'成果生成统计.json','source-errors':'来源异常清单.xlsx','resolution':'整体挂接消歧.xlsx','cad':'CAD实体清单.xlsx','cad-status':'CAD读取状态.xlsx','coordinate-pending':'矢量坐标待确认.xlsx'}
-                if parts[3] in artifacts:return self.file(job/'outputs/governance'/artifacts[parts[3]],True,True)
-                if parts[3]=='source' and len(parts)==5:
-                    source=read_json(job/'review.json')['sources'].get(parts[4])
-                    if not source or not source.get('path'):raise FileNotFoundError('来源仅有属性证据，请查看来源详情。')
-                    path=Path(source['path']).resolve()
-                    if not any(path.is_relative_to(p.resolve()) for p in (BASE,SOURCE)):raise ValueError('来源不在项目或数据源目录内。')
-                    return self.file(path,path.suffix.lower() not in ('.pdf','.jpg','.jpeg','.png','.bmp'))
-            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','spatial.js':'spatial.js','matching.js':'matching.js','mount.js':'mount.js'}
+            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('storage','jobs','datafiles','current'):
+                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
+            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','mount.js':'mount.js'}
             path=urlsplit(self.path).path.lstrip('/')
             if path not in allowed:raise FileNotFoundError('页面不存在。')
             return self.file(BASE/'app/static'/allowed[path])
@@ -418,23 +641,8 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if origin and origin!=f'http://{self.headers.get("Host")}':return self.json({'error':'不接受其他网页发起的操作。'},403)
             parts=urlsplit(self.path).path.strip('/').split('/')
-            if len(parts)==3 and parts[:2]==['api','jobs']:
-                job=job_path(parts[2])
-                if read_json(job/'meta.json',{}).get('status') in ('queued','running'):raise ValueError('任务正在处理，暂不能删除。')
-                with LOCKS.setdefault(parts[2],threading.RLock()):
-                    remove_tree(job)
-                LOCKS.pop(parts[2],None)
-                return self.json({'deleted':parts[2]})
-            if len(parts)>=3 and parts[:2]==['api','datafiles']:
-                key=unquote('/'.join(parts[2:]));match=re.fullmatch(r'(work|outputs)/([^/]+)',key)
-                if not match:raise ValueError('数据条目无效。')
-                root,name=match.groups();path=(BASE/root/name).resolve();parent=path.parent.resolve()
-                if not (parent==(BASE/root).resolve() and parent.is_relative_to(BASE.resolve())):raise ValueError('数据条目不在允许的目录内。')
-                if root=='work' and name in PROTECTED_WORK_ENTRIES:raise ValueError('该项为程序依赖或任务数据，不可在此删除。')
-                if not path.exists():raise FileNotFoundError('数据条目不存在，请刷新列表。')
-                if path.is_dir():remove_tree(path)
-                else:path.unlink()
-                return self.json({'deleted':key})
+            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('jobs','datafiles','storage'):
+                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
             raise FileNotFoundError('接口不存在。')
         except (ValueError,KeyError) as e:self.json({'error':str(e)},400)
         except FileNotFoundError as e:self.json({'error':str(e)},404)
@@ -454,15 +662,10 @@ class Handler(BaseHTTPRequestHandler):
                     catalog=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
                     try: updated=catalog.update_project_boundary(payload.get('project_id'),payload.get('new_root_rel'),payload.get('new_name'))
                     finally: catalog.close()
-                    mount_update(status='interrupted',phase='目录边界已调整，请重新扫描并复核关联')
+                    mount_update(status='ready',phase='项目大目录边界已人工修正并保护，涉及该目录的关联建议重新复核')
                     return self.json(dict(updated=updated))
             if parts==['api','folder-mount','scan']:
-                payload=json.loads(self.body(65536)); validate_methods(payload.get('methods'))
-                with MOUNT_LOCK:
-                    if MOUNT_STATE['status']=='running':raise ValueError('正在扫描，请等待完成。')
-                    mount_update(status='running',phase='扫描目录',errors=[],stages=[],current_archive='',current_member='',processed=0,total=0)
-                    MOUNT_POOL.submit(mount_scan,payload['methods'])
-                    return self.json(MOUNT_STATE,202)
+                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
             if parts==['api','folder-mount','decision']:
                 payload=json.loads(self.body(65536))
                 with MOUNT_LOCK:
@@ -479,40 +682,8 @@ class Handler(BaseHTTPRequestHandler):
                     decisions[link['id']]=dict(status=status,signature=link['signature'],review_context=link.get('review_context'),method_signatures=link.get('method_signatures',{'M2':link['signature']}),rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
                     write_json(MOUNT_DIR/'decisions.json',decisions)
                     return self.json(mount_view())
-            if parts in (['api','jobs'],['api','current']):
-                payload=self.body() if parts==['api','jobs'] else (BASE/'test_result.xlsx').read_bytes()
-                name=unquote(self.headers.get('X-Filename','test_result.xlsx'))
-                if not name.lower().endswith('.xlsx'):raise ValueError('仅支持 .xlsx 文件。')
-                ident=uuid.uuid4().hex[:16];job=JOBS/ident;job.mkdir(parents=True)
-                (job/'test_result.xlsx').write_bytes(payload)
-                try:validate_upload(job/'test_result.xlsx')
-                except Exception:
-                    (job/'test_result.xlsx').unlink();job.rmdir();raise
-                write_json(job/'meta.json',dict(filename=name,status='queued',phase='等待检索',progress=0,created_at=datetime.now().isoformat(timespec='seconds')))
-                LOCKS[ident]=threading.RLock()
-                POOL.submit(execute,job)
-                return self.json({'id':ident},202)
-            if len(parts)==4 and parts[:2]==['api','jobs']:
-                ident=parts[2];job=job_path(ident);lock=LOCKS.setdefault(ident,threading.RLock())
-                with lock:
-                    if parts[3]=='rerun':
-                        if read_json(job/'meta.json')['status'] not in ('ready','failed'):raise ValueError('任务正在处理，请等待当前处理结束。')
-                        update(job,status='queued',phase='重新检索当前任务',progress=0,error=None)
-                        POOL.submit(execute,job)
-                        return self.json({'id':ident},202)
-                    if read_json(job/'meta.json')['status']!='ready':raise ValueError('检索未完成，暂不能选择或导出。')
-                    actions={'judgement':save_judgement,'alias':save_alias,'coordinate-system':save_coordinate_system,'relationship':save_relationship_decision}
-                    if parts[3] in actions:
-                        result=actions[parts[3]](job,json.loads(self.body(65536)))
-                        update(job,status='queued',phase='按人工证据重新匹配',progress=0);POOL.submit(refresh_matching,job)
-                        return self.json(dict(result,id=ident),202)
-                    if parts[3]=='georeference':return self.json(save_georeference(job,json.loads(self.body(65536))))
-                    if parts[3]=='choice':
-                        payload=json.loads(self.body(65536));review=save_choice(job,payload['cell'],payload.get('candidate_id'),payload.get('confirm_project') is True)
-                        return self.json(review)
-                    if parts[3]=='export':
-                        export_review(job)
-                        return self.json({'download':f'/api/jobs/{ident}/download','audit':f'/api/jobs/{ident}/audit'})
+            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('jobs','current','storage','datafiles'):
+                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
             raise FileNotFoundError('接口不存在。')
         except (ValueError,KeyError,json.JSONDecodeError) as e:self.json({'error':str(e)},400)
         except FileNotFoundError as e:self.json({'error':str(e)},404)

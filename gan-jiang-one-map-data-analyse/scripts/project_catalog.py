@@ -698,9 +698,23 @@ class ProjectCatalog:
             'decisions_count': len(self.decisions),
             'decisions': self.decisions,
         }
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
         temp_file = self.storage_file.with_suffix('.tmp')
-        temp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
-        temp_file.replace(self.storage_file)
+        temp_file.write_text(text, encoding='utf-8')
+        for attempt in range(5):
+            try:
+                temp_file.replace(self.storage_file)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    self.storage_file.write_text(text, encoding='utf-8')
+                    try:
+                        temp_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                else:
+                    import time
+                    time.sleep(0.02 * (attempt + 1))
 
     def _decision_for_parts(self, stage_id, normalized_parts):
         dec_id = catalog_identifier(f"{stage_id}:{'/'.join(normalized_parts)}")
@@ -1085,6 +1099,82 @@ class ProjectCatalog:
         self.rebuild_prefixes()
         self.save()
         return applied
+
+    def ensure_agent_decisions_applied(self, decisions_file=None):
+        """若存在 Agent 决策文件（如 storage_dir/agent_decisions.json），自动过滤当前数据源有效目录并入库。"""
+        candidates = []
+        if decisions_file:
+            candidates.append(Path(decisions_file))
+        candidates.append(self.storage_dir / 'agent_decisions.json')
+        repo_base = Path(__file__).resolve().parent.parent
+        default_decisions = repo_base / 'work/folder_mount/agent_decisions.json'
+        if default_decisions not in candidates and self.storage_dir.resolve() == (repo_base / 'work/folder_mount').resolve():
+            candidates.append(default_decisions)
+
+        for cand in candidates:
+            if not cand.is_file():
+                continue
+            try:
+                payload = json.loads(cand.read_text(encoding='utf-8'))
+                items = payload.get('decisions', payload) if isinstance(payload, dict) else payload
+                if not isinstance(items, list) or not items:
+                    continue
+                valid_items = []
+                for item in items:
+                    sid = item.get('stage_id')
+                    rel = str(item.get('rel_path') or '').strip().strip('/\\')
+                    if sid in STAGE_DICT and rel:
+                        phys = self.resolve_physical_dir(sid, rel)
+                        if phys is not None and disk_path(phys).exists():
+                            dec_id = catalog_identifier(f"{sid}:{'/'.join(normalize_dir_name(p) for p in re.split(r'[/\\\\!]', rel) if p)}")
+                            if dec_id not in self.decisions:
+                                valid_items.append(item)
+                if valid_items:
+                    self.apply_agent_decisions(valid_items)
+                break
+            except Exception:
+                continue
+
+    def find_pending_complex_directories(self):
+        """检查当前七阶段数据源中是否存在尚未经 Agent 语义判断的复杂目录（多项目批次/汇编容器或嵌套项目目录）。
+        不允许普通规则扫描结果冒充 Agent 智能研判结果。
+        """
+        pending = []
+        for sid, sname in STAGES:
+            stage_root = self.root / sname
+            if not stage_root.is_dir():
+                continue
+            top_dirs, _ = self._inspect_child_dirs(stage_root)
+            for td in top_dirs:
+                rel_parts = [normalize_dir_name(td.name)]
+                norm_rel = '/'.join(rel_parts)
+                if not norm_rel:
+                    continue
+                dec = self._decision_for_parts(sid, rel_parts)
+                if dec and dec.get('decision_source') in ('agent', 'manual'):
+                    continue
+                if self._is_multi_project_container_on_disk(sid, rel_parts):
+                    # 若是纯分类目录（如“出让”、“划拨”、“规划条件盖章版”），继续检查其二级目录中是否有复杂多项目容器
+                    if is_pure_classification(rel_parts[0]):
+                        sub_dirs, _ = self._inspect_child_dirs(td)
+                        for sd in sub_dirs:
+                            sub_parts = [rel_parts[0], normalize_dir_name(sd.name)]
+                            sub_dec = self._decision_for_parts(sid, sub_parts)
+                            if sub_dec and sub_dec.get('decision_source') in ('agent', 'manual'):
+                                continue
+                            if self._is_multi_project_container_on_disk(sid, sub_parts):
+                                pending.append({
+                                    'stage_id': sid,
+                                    'rel_path': '/'.join(sub_parts),
+                                    'reason': '分类目录下的多项目汇总/嵌套容器未经 Agent 研判',
+                                })
+                    else:
+                        pending.append({
+                            'stage_id': sid,
+                            'rel_path': norm_rel,
+                            'reason': '多项目批次/汇编/嵌套容器未经 Agent 语义研判',
+                        })
+        return pending
 
     def flag_boundary_review(self, directory_id, reason, evidence=None):
         """由 M1/M2 发现的代码冲突、共用附件或多项目材料反向触发项目边界复核（不自动合并宗地）。"""

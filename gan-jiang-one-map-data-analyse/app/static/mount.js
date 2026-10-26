@@ -1,488 +1,834 @@
-let mountData=null,mountTimer=null,mountSearchTimer=null,mountPage=1,mountRequest=0;
-let activeReviewProjectId=null,activeReviewFolderIds=[],activePreviewPath=null;
-const mountLabels={pending:'候选待确认',confirmed:'已确认',rejected:'已排除',review:'需复核',unlinked:'未找到对应',unscanned:'待匹配'};
+'use strict';
 
-document.querySelectorAll('[data-module]').forEach(button=>button.onclick=()=>{
-  document.querySelectorAll('[data-module]').forEach(item=>{const active=item===button;item.classList.toggle('active',active);item.setAttribute('aria-pressed',String(active));});
-  for(const name of ['mount','extract','output'])$(name+'Module').classList.toggle('hidden',button.dataset.module!==name);
+let mountPage = 1;
+let mountStageConfig = [];
+let conflictPage = 1;
+
+const mountStatusText = status => ({
+  confirmed: '✓ 已人工确认',
+  pending: '待确认候选',
+  review: '待复核候选',
+  rejected: '✕ 已人工排除',
+  unlinked: '未关联目录',
+  unscanned: '待挂接（当前仅识别目录）',
+}[status] || status);
+
+const mountMethodLabel = methods => {
+  const list = Array.isArray(methods) && methods.length ? methods : ['M2'];
+  if (list.includes('M1') && list.includes('M2')) return 'M1+M2';
+  return list.join('+');
+};
+
+const renderAuditHistory = confirmation => {
+  const conf = confirmation || {};
+  const history = Array.isArray(conf.history) ? conf.history : [];
+  const entries = [];
+  if (conf.status && conf.updated_at) {
+    entries.push({ ...conf, is_current: true });
+  }
+  for (let i = history.length - 1; i >= 0; i--) {
+    entries.push({ ...history[i], is_current: false });
+  }
+  if (!entries.length) {
+    return node('div', { style: 'font-size:11px;color:#6b7280;margin-top:4px;' }, ['暂无人工审核历史记录']);
+  }
+  return node('details', { className: 'audit-history-box' }, [
+    node('summary', {}, [`查看审核历史（共 ${entries.length} 条记录，绑定证据版本）`]),
+    node('ul', { className: 'audit-history-list' }, entries.map(item =>
+      node('li', {}, [
+        node('strong', {}, [item.is_current ? '[当前决定] ' : '[历史记录] ']),
+        `${mountStatusText(item.status)} · 操作人：${item.actor || '本机用户'} · 时间：${item.updated_at || '-'} · 证据版本签名：`,
+        node('code', {}, [String(item.signature || '').slice(0, 12) || '-']),
+      ])
+    )),
+  ]);
+};
+
+const mountStageName = stageId => {
+  const found = mountStageConfig.find(s => s.stage_id === stageId);
+  return found ? `${stageId} ${found.title || found.name}` : stageId;
+};
+
+const syncStageSelectOptions = (selectEl, stages) => {
+  if (!selectEl || selectEl.options.length > 1) return;
+  const stageIds = (stages?.length ? stages : mountStageConfig).map(s => s.stage_id);
+  const ids = stageIds.length ? stageIds : ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
+  ids.forEach(s => selectEl.append(node('option', { value: s, textContent: `${s} 单阶段筛选` })));
+  ids.forEach((a, i) => ids.slice(i + 1).forEach(b => selectEl.append(node('option', { value: `${a}-${b}`, textContent: `${a}-${b}` }))));
+};
+
+const mountPairs = stages => {
+  syncStageSelectOptions($('#mountPair'), stages);
+  syncStageSelectOptions($('#conflictStageFilter'), stages);
+};
+
+const mountFolderNode = (folder, compact = false) => {
+  const realPath = folder.folder || '';
+  const pathEl = node('div', {
+    className: 'manager-path clickable-path',
+    title: `点击在资源管理器打开：${realPath}`,
+    textContent: realPath,
+  });
+  pathEl.onclick = e => { e.stopPropagation(); openWindowsPath(realPath, 'folder'); };
+
+  const copyBtn = node('button', { className: 'secondary manager-copy', type: 'button', textContent: '复制路径' });
+  copyBtn.onclick = e => { e.stopPropagation(); copyDirectoryPath(realPath, copyBtn); };
+
+  const openBtn = node('button', { className: 'secondary manager-copy', type: 'button', textContent: '打开目录' });
+  openBtn.onclick = e => { e.stopPropagation(); openWindowsPath(realPath, 'folder'); };
+
+  const badges = [];
+  if (folder.decision_source === 'agent') {
+    badges.push(node('span', { className: 'mount-sha-tag', style: 'margin-left:6px;background:#dcfce7;color:#166534;', textContent: 'Agent研判' }));
+  } else if (folder.decision_source === 'manual') {
+    badges.push(node('span', { className: 'mount-sha-tag', style: 'margin-left:6px;background:#dbeafe;color:#1e40af;', textContent: '人工锁定' }));
+  }
+  if (folder.boundary_review) {
+    badges.push(node('span', { className: 'conflict-type-badge type-boundary_review', style: 'margin-left:6px;', textContent: '目录边界待复核' }));
+  }
+
+  return node('div', { className: compact ? 'mount-project-folder' : '' }, [
+    node('div', { style: 'display:flex;align-items:center;flex-wrap:wrap;gap:4px;' }, [
+      node('strong', { textContent: `${folder.stage ? folder.stage + ' · ' : ''}${folder.name || ''}` }),
+      ...badges,
+    ]),
+    pathEl,
+    node('small', { textContent: `${folder.kind === 'archive' ? '压缩包解压项目目录' : '项目文件夹'} · 有效材料 ${folder.files ?? 0} 份` }),
+    node('div', { style: 'display:flex;gap:6px;margin-top:4px;' }, [openBtn, copyBtn]),
+  ]);
+};
+
+const getFileExt = p => {
+  const m = String(p || '').toLowerCase().match(/(\.[a-z0-9]+)$/);
+  return m ? m[1] : '';
+};
+
+const renderFilePreview = (container, fileInfo, stageLabel) => {
+  container.replaceChildren();
+  const realPath = fileInfo.physical_path || fileInfo.logical_path || '';
+  const ext = getFileExt(realPath);
+  const pageSuffix = fileInfo.page ? `#page=${fileInfo.page}` : '';
+  const previewUrl = `/api/folder-mount/file?path=${encodeURIComponent(realPath)}${pageSuffix}`;
+  const downloadUrl = `/api/folder-mount/file?path=${encodeURIComponent(realPath)}&download=1`;
+
+  const openFolderBtn = node('button', { className: 'secondary', type: 'button', textContent: '📂 定位文件所在目录' });
+  openFolderBtn.onclick = () => openWindowsPath(realPath, 'select');
+
+  const openNativeBtn = node('button', { className: 'secondary', type: 'button', textContent: '🖥️ 用本机默认程序打开' });
+  openNativeBtn.onclick = () => openWindowsPath(realPath, 'open');
+
+  const copyBtn = node('button', { className: 'secondary', type: 'button', textContent: '📋 复制完整路径' });
+  copyBtn.onclick = () => copyDirectoryPath(realPath, copyBtn);
+
+  const downloadLink = node('a', {
+    className: 'secondary mount-action-link',
+    href: downloadUrl,
+    target: '_blank',
+    rel: 'noopener',
+    textContent: '⬇️ 下载原文件',
+  });
+
+  const head = node('div', { className: 'mount-preview-head' }, [
+    node('div', { className: 'mount-preview-title' }, [
+      node('span', { className: 'mount-stage-badge', textContent: stageLabel || '证据文件' }),
+      node('strong', { textContent: realPath.split(/[\\/!]/).pop() || realPath }),
+      fileInfo.page ? node('span', { className: 'mount-sha-tag', textContent: `第 ${fileInfo.page} 页` }) : '',
+    ]),
+    node('div', { className: 'manager-path clickable-path', textContent: realPath, title: '点击在资源管理器中定位该文件' }),
+    node('div', { className: 'mount-preview-actions' }, [openFolderBtn, openNativeBtn, copyBtn, downloadLink]),
+  ]);
+  head.querySelector('.manager-path').onclick = () => openWindowsPath(realPath, 'select');
+
+  const body = node('div', { className: 'mount-preview-body' });
+
+  if (ext === '.pdf') {
+    body.append(node('iframe', { className: 'mount-preview-frame', src: previewUrl, title: 'PDF 证据预览' }));
+  } else if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'].includes(ext)) {
+    body.append(node('div', { className: 'mount-preview-img-wrap' }, [
+      node('img', { className: 'mount-preview-image', src: previewUrl, alt: realPath }),
+    ]));
+  } else if (['.txt', '.csv', '.json', '.md', '.xml', '.prj', '.cpg', '.log'].includes(ext)) {
+    const pre = node('pre', { className: 'mount-preview-text', textContent: '正在加载文件内容...' });
+    body.append(pre);
+    fetch(previewUrl).then(r => r.ok ? r.text() : Promise.reject(new Error('读取失败'))).then(txt => {
+      pre.textContent = txt.slice(0, 100000) || '（文件内容为空）';
+    }).catch(err => {
+      pre.textContent = `无法直接读取文本：${err.message}`;
+    });
+  } else {
+    body.append(node('div', { className: 'mount-preview-unsupported' }, [
+      node('h3', { textContent: `${realPath.split(/[\\/!]/).pop()} (${ext || '未知格式'})` }),
+      node('p', { textContent: '该格式（如 Word / Excel / CAD / 矢量图层）不支持浏览器内直接渲染，请使用本机程序打开或定位到目录查看。' }),
+      node('div', { className: 'mount-preview-Actions-large' }, [
+        node('button', { className: 'primary', type: 'button', textContent: '🖥️ 直接用本机程序打开', onclick: () => openWindowsPath(realPath, 'open') }),
+        node('button', { className: 'secondary', type: 'button', textContent: '📂 在资源管理器中显示', onclick: () => openWindowsPath(realPath, 'select') }),
+      ]),
+    ]));
+  }
+
+  container.append(head, body);
+};
+
+const getFileTypeIcon = filename => {
+  const ext = getFileExt(filename);
+  if (ext === '.pdf') return '📕';
+  if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].includes(ext)) return '🖼️';
+  if (['.doc', '.docx'].includes(ext)) return '📘';
+  if (['.xls', '.xlsx', '.csv'].includes(ext)) return '📗';
+  if (['.dwg', '.dxf', '.shp'].includes(ext)) return '📐';
+  return '📄';
+};
+
+const renderEvidenceFileCard = (fileObj, stageLabel, previewPane) => {
+  const realPath = fileObj.physical_path || fileObj.logical_path || '';
+  const fileName = realPath.split(/[\\/!]/).pop() || realPath;
+  const archiveChain = (fileObj.archive_chain || []).map(a => a.split(/[\\/]/).pop()).join(' → ');
+
+  const card = node('div', { className: 'mount-file-card', title: `完整路径：${realPath}` });
+
+  const previewBtn = node('button', { className: 'primary', type: 'button', textContent: '👁️ 右侧预览' });
+  previewBtn.onclick = e => {
+    e.stopPropagation();
+    document.querySelectorAll('.mount-file-card.active').forEach(el => el.classList.remove('active'));
+    card.classList.add('active');
+    if (previewPane) renderFilePreview(previewPane, fileObj, stageLabel);
+  };
+
+  const openDirBtn = node('button', { className: 'secondary', type: 'button', textContent: '📂 所在目录' });
+  openDirBtn.onclick = e => { e.stopPropagation(); openWindowsPath(realPath, 'select'); };
+
+  const openAppBtn = node('button', { className: 'secondary', type: 'button', textContent: '🖥️ 本机打开' });
+  openAppBtn.onclick = e => { e.stopPropagation(); openWindowsPath(realPath, 'open'); };
+
+  card.append(
+    node('div', { className: 'mount-file-main' }, [
+      node('span', { className: 'mount-file-icon', textContent: getFileTypeIcon(fileName) }),
+      node('span', { className: 'mount-file-name', textContent: fileName }),
+    ]),
+    fileObj.small_dir ? node('div', { className: 'mount-small-dir-tag', textContent: `📁 所属子路径：${fileObj.small_dir}` }) : '',
+    archiveChain ? node('span', { className: 'mount-archive-tag', textContent: `📦 来源压缩包：${archiveChain}` }) : '',
+    node('div', { className: 'mount-file-btns' }, [previewBtn, openDirBtn, openAppBtn])
+  );
+
+  card.onclick = () => previewBtn.click();
+  return card;
+};
+
+const mountEvidenceList = (link, box, page = 1, q = '', previewPane = null, method = 'all') => api(`/api/folder-mount/links/${link.id}?page=${page}&q=${encodeURIComponent(q)}&method=${encodeURIComponent(method)}`).then(data => {
+  box.replaceChildren(...data.evidence.map((e, idx) => {
+    if (e.method === 'M1' || e.canonical_code) {
+      const leftCard = renderEvidenceFileCard({ physical_path: e.left_source_path, logical_path: e.left_source_path, page: e.left_page }, `${link.left.stage} 代码证据`, previewPane);
+      const rightCard = renderEvidenceFileCard({ physical_path: e.right_source_path, logical_path: e.right_source_path, page: e.right_page }, `${link.right.stage} 代码证据`, previewPane);
+      if (idx === 0 && page === 1 && previewPane && !previewPane.dataset.initialized) {
+        previewPane.dataset.initialized = '1';
+        setTimeout(() => leftCard.click(), 30);
+      }
+      return node('div', { className: 'mount-evidence' }, [
+        node('div', { className: 'mount-sha-header' }, [
+          node('span', { className: 'mount-sha-tag', textContent: `M1 项目代码 #${(page - 1) * 20 + idx + 1} · ${e.canonical_code}` }),
+          node('code', { className: 'mount-sha-hash', textContent: `${e.code_type || ''} · 权重 ${e.weight || ''}` }),
+        ]),
+        node('p', { textContent: `左阶段位置：${e.left_field_name || e.left_location || '-'}（页码：${e.left_page ?? '无'}）｜右阶段位置：${e.right_field_name || e.right_location || '-'}（页码：${e.right_page ?? '无'}）` }),
+        node('p', { textContent: `命中片段：${e.left_snippet || ''} ⇄ ${e.right_snippet || ''}` }),
+        node('div', { className: 'mount-evidence-pair' }, [
+          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title', textContent: `◀ ${link.left.stage} · ${link.left.name}` }), leftCard]),
+          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title', textContent: `▶ ${link.right.stage} · ${link.right.name}` }), rightCard]),
+        ]),
+      ]);
+    }
+    const leftCards = (e.left_files || []).map(f => renderEvidenceFileCard(f, `${link.left.stage} · ${link.left.name}`, previewPane));
+    const rightCards = (e.right_files || []).map(f => renderEvidenceFileCard(f, `${link.right.stage} · ${link.right.name}`, previewPane));
+    if (idx === 0 && page === 1 && leftCards[0] && previewPane && !previewPane.dataset.initialized) {
+      previewPane.dataset.initialized = '1';
+      setTimeout(() => leftCards[0].click(), 30);
+    }
+    const shortSha = (e.sha256 || '').slice(0, 12);
+    return node('div', { className: 'mount-evidence' }, [
+      node('div', { className: 'mount-sha-header' }, [
+        node('span', { className: 'mount-sha-tag', textContent: `M2 相同附件 #${(page - 1) * 20 + idx + 1}` }),
+        node('code', { className: 'mount-sha-hash', title: `完整 SHA-256 指纹：${e.sha256}`, textContent: `SHA-256: ${shortSha}...` }),
+      ]),
+      node('div', { className: 'mount-evidence-pair' }, [
+        node('div', { className: 'mount-evidence-side' }, [
+          node('div', { className: 'mount-side-title', textContent: `◀ ${link.left.stage} · ${link.left.name}` }),
+          ...leftCards,
+        ]),
+        node('div', { className: 'mount-evidence-side' }, [
+          node('div', { className: 'mount-side-title', textContent: `▶ ${link.right.stage} · ${link.right.name}` }),
+          ...rightCards,
+        ]),
+      ]),
+    ]);
+  }));
+  if (data.pages > 1) {
+    const prev = node('button', { className: 'secondary', type: 'button', textContent: '上一页证据', disabled: data.page <= 1 });
+    const next = node('button', { className: 'secondary', type: 'button', textContent: '下一页证据', disabled: data.page >= data.pages });
+    prev.onclick = () => mountEvidenceList(link, box, data.page - 1, q, previewPane, method);
+    next.onclick = () => mountEvidenceList(link, box, data.page + 1, q, previewPane, method);
+    box.append(node('div', { className: 'mount-toolbar' }, [prev, node('span', { textContent: `第 ${data.page} / ${data.pages} 页（共 ${data.count} 组证据）` }), next]));
+  }
 });
 
-if($('closeMountReview'))$('closeMountReview').onclick=()=>{$('mountReviewDialog').close();activeReviewProjectId=null;activeReviewFolderIds=[];};
+const mountEvidenceLoader = (link, previewPane = null, autoOpen = false) => {
+  const box = node('div');
+  const methodSelect = node('select', {}, [
+    node('option', { value: 'all', textContent: '全部方法证据' }),
+    node('option', { value: 'M1', textContent: '仅看 M1 项目代码证据' }),
+    node('option', { value: 'M2', textContent: '仅看 M2 相同附件证据' }),
+  ]);
+  const input = node('input', { type: 'search', placeholder: '筛选本关系的证据文件名、项目代码或 SHA-256...' });
+  input.oninput = () => mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value);
+  methodSelect.onchange = () => mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value);
 
-function mountParams(){return new URLSearchParams({view:'projects',q:$('mountQuery').value.trim(),status:$('mountFilter').value,method:$('mountMethodFilter').value,pair:$('mountPair').value,page:String(mountPage)});}
-
-function mountPathNode(path,action='folder',prefix='📂 '){
-  const label=node('div',prefix+path,'manager-path clickable-path');
-  label.title=(action==='select'?'点击在 Windows 资源管理器中定位此文件：\n':'点击在 Windows 资源管理器中打开此文件夹：\n')+path;
-  label.onclick=e=>{e.stopPropagation();openWindowsPath(path,action);};
-  return label;
-}
-
-function mountCodeSource(source){
-  const block=node('div',undefined,'mount-code-source');
-  const type={body_field:'正文',structured_field:'结构化字段',filename:'文件名',project_directory:'项目目录',subdirectory:'子目录',ocr:'OCR'}[source.source_type]||source.source_type;
-  block.append(node('p',`${source.normalized_code} ｜ 原始：${source.raw_code} ｜ ${source.stage} ｜ ${source.project_name} ｜ ${type} ｜ ${source.location} ｜ ${source.grade||''}级 ｜ ${source.ownership_status==='unresolved_ownership'?'无法确定归属':source.ownership_status||''} ｜ ${source.conflict?'多代码冲突':source.needs_review?'需复核':'候选证据'}`));
-  block.append(mountPathNode(source.physical_path||source.source_path,source.source_type.includes('directory')?'folder':'select','来源：'),node('p',source.text_evidence));
-  if(source.ocr_engine)block.append(node('p','OCR 引擎：'+JSON.stringify(source.ocr_engine)));
-  if(source.semantic)block.append(node('p','模型研判（需复核）：'+JSON.stringify(source.semantic)));
-  const preview=node('button','查看来源','secondary');
-  preview.onclick=()=>{if(source.source_type.includes('directory'))openWindowsPath(source.physical_path||source.source_path,'folder');else renderMountPreview({physical_path:source.physical_path||source.source_path,stageLabel:source.stage,page:/^page=(\d+)$/.exec(source.location)?.[1]});};
-  block.append(preview);return block;
-}
-
-function openCodeEvidence(){
-  activeReviewProjectId=null;activeReviewFolderIds=[];activePreviewPath=null;
-  $('mountReviewTitle').textContent='M1 项目代码证据与归属复核';
-  $('mountReviewSubtitle').textContent='孤立代码及归属未明的记录不会生成可信目录关系；同码可能涉及不同宗地。';
-  const left=$('mountReviewLeft'),filter=node('select'),list=node('div'),bar=node('div'),prev=node('button','上一页','secondary'),next=node('button','下一页','secondary'),label=node('span');
-  filter.setAttribute('aria-label','代码证据状态');
-  for(const [value,text] of [['all','全部代码证据'],['review','需复核'],['unresolved_ownership','无法确定归属'],['current_project','当前目录候选']]){const option=node('option',text);option.value=value;filter.append(option);}
-  let page=1,request=0;
-  const load=async()=>{const current=++request;try{const data=await api('/api/folder-mount/code-evidence?'+new URLSearchParams({status:filter.value,page:String(page)}));if(current!==request)return;list.replaceChildren(...data.evidence.map(mountCodeSource));label.textContent=`第 ${data.page}/${data.pages} 页 · ${data.count} 条`;prev.disabled=data.page<=1;next.disabled=data.page>=data.pages;}catch(error){list.replaceChildren(node('p',error.message));}};
-  filter.onchange=()=>{page=1;load();};prev.onclick=()=>{page--;load();};next.onclick=()=>{page++;load();};
-  bar.append(prev,label,next);left.replaceChildren(filter,list,bar);renderMountPreview(null);$('mountReviewDialog').showModal();load();
-}
-
-function mountProjectCell(folders){
-  const cell=node('td');
-  if(!folders.length){cell.append(node('span',mountData?.inventory_only?'待匹配':'—','mount-missing'));return cell;}
-  const content=node('div');
-  for(const folder of folders){
-    const block=node('div',undefined,'mount-project-folder'),title=node('strong',folder.name);
-    if(folder.candidate)block.append(node('small','待确认候选','mount-warning'));
-    block.append(title);
-    for(const path of folder.paths||[folder.folder]){
-      block.append(mountPathNode(path,'folder'));
-    }
-    content.append(block);
+  if (autoOpen) {
+    setTimeout(() => mountEvidenceList(link, box, 1, '', previewPane, 'all').catch(e => notify(e.message, true)), 10);
+    return node('div', { className: 'mount-evidence-container' }, [
+      node('div', { className: 'mount-evidence-topbar' }, [
+        node('strong', { textContent: `🔍 关联证据文件明细（共 ${link.evidence_count} 组）` }),
+        methodSelect,
+        input,
+      ]),
+      box,
+    ]);
   }
-  if(folders.length>1){const details=node('details');details.append(node('summary',`${folders.length} 个文件夹候选 · 展开`),content);cell.append(details);}else cell.append(content);
-  return cell;
-}
 
-function renderMountPreview(fileInfo){
-  const box=$('mountReviewRight');
-  if(!box)return;
-  if(!fileInfo||!fileInfo.physical_path){
-    box.replaceChildren(node('div','点击左侧任意证据文件即可在此直接预览文件内容，或打开所在文件夹。','mount-preview-empty'));
+  const wrap = node('details', {}, [node('summary', { textContent: `查看关联证据（${link.evidence_count} 组）` }), methodSelect, input, box]);
+  wrap.ontoggle = () => { if (wrap.open && !box.childElementCount) mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value).catch(e => notify(e.message, true)); };
+  return wrap;
+};
+
+let currentReviewContext = null;
+
+const refreshAfterDecision = async data => {
+  renderMount(data);
+  if ($('#mountView').value === 'projects') {
+    await loadMount();
+  }
+  if (!$('#conflictsModule').classList.contains('hidden')) {
+    await loadConflicts();
+  }
+  const dialog = $('#mountReviewDialog');
+  if (dialog?.open && currentReviewContext) {
+    if (currentReviewContext.type === 'link') {
+      const updated = (data.links || []).find(l => l.id === currentReviewContext.id);
+      if (updated) openMountReviewDialog({ type: 'link', link: updated });
+      else {
+        const fresh = await api(`/api/folder-mount?view=links&q=${encodeURIComponent(currentReviewContext.id)}`);
+        const found = (fresh.links || []).find(l => l.id === currentReviewContext.id);
+        if (found) openMountReviewDialog({ type: 'link', link: found });
+      }
+    } else if (currentReviewContext.type === 'project') {
+      const res = await api(`/api/folder-mount?view=projects&q=${encodeURIComponent(currentReviewContext.title || '')}`);
+      const updatedRow = (res.rows || []).find(r => r.id === currentReviewContext.id);
+      if (updatedRow) openMountReviewDialog({ type: 'project', row: updatedRow });
+    }
+  }
+};
+
+const decideMount = (link, status) => api('/api/folder-mount/decision', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ id: link.id, signature: link.signature, status }),
+}).then(async data => {
+  await refreshAfterDecision(data);
+  const label = {
+    confirmed: '已人工确认该关联（证据版本已保存）',
+    rejected: '已人工排除该关联',
+    review: '已标记该关联为待复核',
+    pending: '已撤销之前的人工决定，恢复为待确认候选',
+  }[status] || '状态已更新';
+  notify(label);
+}).catch(e => notify(e.message, true));
+
+const mountActionButtons = link => {
+  const confirm = node('button', { className: 'mount-btn-confirm', type: 'button', textContent: '✓ 确认关联' });
+  const reject = node('button', { className: 'mount-btn-reject', type: 'button', textContent: '✕ 排除关联' });
+  const review = node('button', { className: 'mount-btn-review', type: 'button', textContent: '⚑ 标记需复核' });
+  const reset = node('button', { className: 'secondary', type: 'button', textContent: '↺ 撤销人工决定' });
+  confirm.onclick = () => decideMount(link, 'confirmed');
+  reject.onclick = () => decideMount(link, 'rejected');
+  review.onclick = () => decideMount(link, 'review');
+  reset.onclick = () => decideMount(link, 'pending');
+  return [confirm, reject, review, reset];
+};
+
+const mountRelation = (link, previewPane = null, autoOpen = false) => {
+  const stageClass = s => `mount-stage-pill stage-${String(s || '').toLowerCase()}`;
+  const methodBadge = mountMethodLabel(link.methods);
+  const m1State = link.m1_validation ? ` · M1校验:${link.m1_validation.state}` : '';
+  const hasHistory = Boolean(link.confirmation?.status || link.confirmation?.history?.length);
+
+  return node('div', { className: 'mount-relation-card' }, [
+    node('div', { className: 'mount-relation-header' }, [
+      node('div', { className: 'mount-relation-title-area' }, [
+        node('div', { className: 'mount-relation-title' }, [
+          node('span', { className: stageClass(link.left.stage), textContent: link.left.stage }),
+          node('strong', { className: 'mount-relation-nodename', textContent: link.left.name }),
+          node('span', { className: 'mount-relation-arrow', textContent: '⇄' }),
+          node('span', { className: stageClass(link.right.stage), textContent: link.right.stage }),
+          node('strong', { className: 'mount-relation-nodename', textContent: link.right.name }),
+        ]),
+        node('span', { className: 'mount-sha-tag', textContent: methodBadge }),
+        node('span', { className: `mount-status-badge status-${link.status}`, textContent: `${mountStatusText(link.status)}${m1State}` }),
+        link.ambiguous ? node('span', { className: 'conflict-type-badge type-multi_parcel_same_code', textContent: '一对多/多对多候选' }) : '',
+        link.conflict ? node('span', { className: 'conflict-type-badge', textContent: 'M1/M2证据冲突' }) : '',
+      ]),
+      node('div', { className: 'mount-relation-header-actions' }, mountActionButtons(link)),
+    ]),
+    link.m1_validation?.reason ? node('p', { className: 'conflict-reasons', style: 'margin:8px 12px 0;', textContent: `校验与复核说明：${link.m1_validation.reason}` }) : '',
+    node('details', { className: 'mount-relation-folders-collapse', open: true }, [
+      node('summary', { textContent: '📁 关联双方项目大目录真实路径（点击路径可在资源管理器打开）' }),
+      node('div', { className: 'mount-relation-folders-inner' }, [
+        mountFolderNode(link.left, true),
+        mountFolderNode(link.right, true),
+      ]),
+    ]),
+    hasHistory ? node('div', { style: 'padding:0 12px;' }, [renderAuditHistory(link.confirmation)]) : '',
+    mountEvidenceLoader(link, previewPane, autoOpen),
+  ]);
+};
+
+const openMountReviewDialog = context => {
+  const dialog = $('#mountReviewDialog');
+  const leftPane = $('#mountReviewLeft');
+  const rightPane = $('#mountReviewRight');
+  delete rightPane.dataset.initialized;
+  leftPane.replaceChildren();
+  rightPane.replaceChildren(node('div', { className: 'mount-preview-empty', textContent: '请点击左侧的任意证据材料文件，在此处直接预览原件（PDF 自动定位命中页码）' }));
+
+  if (context.type === 'project') {
+    const r = context.row;
+    currentReviewContext = { type: 'project', id: r.id, title: r.title };
+    $('#mountReviewTitle').textContent = `项目关联核对：${r.title}`;
+    $('#mountReviewSubtitle').textContent = `当前状态：${mountStatusText(r.status)} · 跨阶段候选关系 ${r.links.length} 条 · 相同附件指纹 ${r.evidence_count} 个`;
+
+    const stageSummary = node('details', { className: 'mount-dialog-stages-collapse' }, [
+      node('summary', { textContent: '📂 查看该项目已归属的各阶段业务项目大目录路径' }),
+      node('div', { className: 'mount-dialog-stages-body' },
+        Object.entries(r.stages || {}).filter(([, v]) => v?.length).map(([sid, list]) =>
+          node('div', { className: 'mount-dialog-stage-item' }, [
+            node('strong', { textContent: `${mountStageName(sid)}：` }),
+            ...list.map(f => mountFolderNode(f, true)),
+          ])
+        )
+      ),
+    ]);
+
+    leftPane.append(
+      stageSummary,
+      ...r.links.map((link, idx) => mountRelation(link, rightPane, idx === 0))
+    );
+  } else if (context.type === 'link') {
+    const link = context.link;
+    currentReviewContext = { type: 'link', id: link.id };
+    $('#mountReviewTitle').textContent = `${link.left.stage} ⇄ ${link.right.stage} 跨阶段目录关系与证据核对`;
+    $('#mountReviewSubtitle').textContent = `${link.left.name} ⇄ ${link.right.name} · 来源方法：${mountMethodLabel(link.methods)} · 状态：${mountStatusText(link.status)} · 证据 ${link.evidence_count} 组`;
+    leftPane.append(mountRelation(link, rightPane, true));
+  }
+
+  if (!dialog.open) dialog.showModal();
+};
+
+const showCodeEvidenceModal = (directory = '', titleText = 'M1 项目代码提取与归属证据') => {
+  api(`/api/folder-mount/code-evidence?directory=${encodeURIComponent(directory)}`).then(data => {
+    const dialog = $('#mountReviewDialog');
+    const left = $('#mountReviewLeft');
+    const right = $('#mountReviewRight');
+    $('#mountReviewTitle').textContent = `${titleText}（共 ${data.count} 条）`;
+    $('#mountReviewSubtitle').textContent = '展示文件相对路径、页码/段落/表格位置、原始代码、规范化代码及归属状态（点击材料可在右侧预览并定位 PDF 页码）';
+    right.replaceChildren(node('div', { className: 'mount-preview-empty', textContent: '点击左侧代码证据材料在右侧预览原件' }));
+    left.replaceChildren(...(data.evidence.length ? data.evidence.map(e => {
+      const card = renderEvidenceFileCard({ physical_path: e.source_path, logical_path: e.rel_path, page: e.page }, `${e.stage_id} ${e.canonical_code}`, right);
+      return node('div', { className: 'mount-evidence' }, [
+        node('div', { className: 'mount-sha-header' }, [
+          node('span', { className: 'mount-sha-tag', textContent: `${e.stage_id} · ${e.canonical_code}` }),
+          node('code', { className: 'mount-sha-hash', textContent: `${e.ownership_status} · 权重 ${e.weight}` }),
+        ]),
+        node('p', { textContent: `原始值：${e.raw_code}｜类型：${e.code_type}｜位置：${e.field_name || e.location}｜页码：${e.page ?? '无'}` }),
+        node('p', { textContent: `文本片段：${e.snippet || ''}` }),
+        e.reason ? node('p', { className: 'mount-warning', textContent: `复核原因：${e.reason}` }) : '',
+        card,
+      ]);
+    }) : [node('div', { className: 'empty-state' }, [node('h3', { textContent: '暂无项目代码证据记录' })])]));
+    if (!dialog.open) dialog.showModal();
+  }).catch(e => notify(e.message, true));
+};
+
+const renderProjectMountTable = data => {
+  const stageConfig = (data.stage_config?.length ? data.stage_config : [
+    { stage_id: 'S1', title: '用地预审与选址' }, { stage_id: 'S2', title: '条件出具' },
+    { stage_id: 'S3', title: '批次报批阶段' }, { stage_id: 'S4', title: '土地供应阶段' },
+    { stage_id: 'S5', title: '土地首次登记' }, { stage_id: 'S6', title: '用地规划' },
+    { stage_id: 'S7', title: '工程规划' },
+  ]);
+  const rows = data.rows || [];
+  if (!rows.length) {
+    $('#mountTable').replaceChildren(node('div', { className: 'empty-state' }, [
+      node('h3', { textContent: '当前筛选条件下没有项目目录或关联记录' }),
+    ]));
     return;
   }
-  activePreviewPath=fileInfo.physical_path;
-  document.querySelectorAll('.mount-file-card').forEach(el=>{
-    el.classList.toggle('active',el.dataset.path===activePreviewPath);
-  });
-  const fileName=fileInfo.physical_path.split(/[\\/]/).pop()||fileInfo.physical_path;
-  const ext=(fileName.includes('.')?fileName.split('.').pop():'').toLowerCase();
-  const fileUrl='/api/folder-mount/file?'+new URLSearchParams({path:fileInfo.physical_path});
-  const downloadUrl=fileUrl+'&download=1';
-
-  const head=node('div',undefined,'mount-preview-head');
-  const titleRow=node('div',undefined,'mount-preview-title');
-  if(fileInfo.stageLabel)titleRow.append(node('span',fileInfo.stageLabel,'mount-stage-badge'));
-  titleRow.append(node('strong',fileName));
-  head.append(titleRow);
-  head.append(mountPathNode(fileInfo.physical_path,'select','📂 '));
-
-  const actions=node('div',undefined,'mount-preview-actions');
-  const openDirBtn=node('button','📂 打开文件目录','secondary');
-  openDirBtn.onclick=()=>openWindowsPath(fileInfo.physical_path,'select');
-  const openAppBtn=node('button','🖥 本机默认程序打开','secondary');
-  openAppBtn.onclick=()=>openWindowsPath(fileInfo.physical_path,'open');
-  const newTabLink=node('a','🔗 新窗口打开','secondary mount-action-link');
-  newTabLink.href=fileUrl;newTabLink.target='_blank';newTabLink.rel='noopener';
-  const downloadLink=node('a','⬇ 下载文件','secondary mount-action-link');
-  downloadLink.href=downloadUrl;downloadLink.target='_blank';downloadLink.rel='noopener';
-  actions.append(openDirBtn,openAppBtn,newTabLink,downloadLink);
-  head.append(actions);
-
-  const body=node('div',undefined,'mount-preview-body');
-  if(ext==='pdf'){
-    const frame=node('iframe');
-    frame.src=fileUrl+(fileInfo.page?'#page='+fileInfo.page:'');
-    frame.className='mount-preview-frame';
-    frame.title=fileName;
-    body.append(frame);
-  }else if(['jpg','jpeg','png','bmp','gif','webp','svg'].includes(ext)){
-    const wrap=node('div',undefined,'mount-preview-img-wrap');
-    const img=node('img');
-    img.src=fileUrl;
-    img.alt=fileName;
-    img.className='mount-preview-image';
-    wrap.append(img);
-    body.append(wrap);
-  }else if(['txt','csv','json','md','xml','prj','cpg','log'].includes(ext)){
-    const pre=node('pre','正在读取文件内容…','mount-preview-text');
-    body.append(pre);
-    fetch(fileUrl).then(r=>r.ok?r.text():Promise.reject(Error(`读取失败 (HTTP ${r.status})`))).then(text=>{
-      pre.textContent=text||'（文件内容为空）';
-    }).catch(err=>{
-      pre.textContent='无法直接读取文本：'+err.message;
-    });
-  }else{
-    const unsupported=node('div',undefined,'mount-preview-unsupported');
-    unsupported.append(
-      node('h3',`${fileName}（.${ext?ext.toUpperCase():'未知'} 格式）`),
-      node('p','浏览器不支持在网页内直接渲染此格式（如 CAD 图纸、Office 文档或矢量数据），您可以通过以下按钮直接调用本机软件查看或打开所在文件夹：')
-    );
-    const btnGroup=node('div',undefined,'mount-preview-Actions-large');
-    const bigOpen=node('button','🖥 用本机默认程序打开此文件','primary');
-    bigOpen.onclick=()=>openWindowsPath(fileInfo.physical_path,'open');
-    const bigFolder=node('button','📂 打开所在 Windows 文件夹','secondary');
-    bigFolder.onclick=()=>openWindowsPath(fileInfo.physical_path,'select');
-    btnGroup.append(bigOpen,bigFolder);
-    unsupported.append(btnGroup);
-    body.append(unsupported);
-  }
-  box.replaceChildren(head,body);
-}
-
-function mountEvidence(link,autoPreviewFirst=false){
-  const container=node('div',undefined,'mount-evidence-container');
-  const topBar=node('div',undefined,'mount-evidence-topbar');
-  topBar.append(node('strong',`${(link.methods||['M2']).join(' + ')} · 共 ${link.evidence_count} 条证据`));
-  const method=node('select');method.setAttribute('aria-label','证据方法');
-  for(const [value,title] of [['all','全部证据'],['M1','M1 项目代码'],['M2','M2 相同附件']]){const option=node('option',title);option.value=value;method.append(option);}
-  topBar.append(method);
-  const search=node('input');search.placeholder='搜索项目代码、文件名或哈希';search.setAttribute('aria-label','搜索材料证据');
-  topBar.append(search);
-  const records=node('div',undefined,'mount-evidence-list'),toolbar=node('div',undefined,'mount-toolbar'),prev=node('button','上一页','secondary'),next=node('button','下一页','secondary'),label=node('span');
-  let page=1,request=0,timer;
-  const load=async()=>{
-    const current=++request;
-    try{
-      const data=await api('/api/folder-mount/links/'+encodeURIComponent(link.id)+'?'+new URLSearchParams({page:String(page),q:search.value.trim(),method:method.value}));
-      if(current!==request)return;
-      records.replaceChildren();
-      let firstCandidate=null;
-      for(const item of data.evidence){
-        const block=node('div',undefined,'mount-evidence');
-        if(item.method==='M1'){
-          block.append(node('strong',`M1 · ${item.normalized_code}`),node('p',item.explanation));
-          for(const side of ['left','right']){
-            for(const source of item[side+'_sources']||[]){
-              block.append(mountCodeSource(source));
-            }
-          }
-          records.append(block);
-          continue;
-        }
-        const shaHeader=node('div',undefined,'mount-sha-header');
-        const shaShort=item.sha256?item.sha256.slice(0,12):'';
-        const matchTag=node('span','🔒 内容完全一致（附件比对）','mount-sha-tag');
-        const shaText=node('span',`SHA-256: ${shaShort}…`,'mount-sha-hash');
-        shaText.title=`完整 SHA-256 哈希值：\n${item.sha256}\n（两端附件字节完全相同）`;
-        shaHeader.append(matchTag,shaText);
-        block.append(shaHeader);
-
-        const grid=node('div',undefined,'mount-evidence-pair');
-        for(const [side,stageLabel,logicalList] of [
-          ['left_details',`${link.left.stage} · ${link.left.name}`,item.left||[]],
-          ['right_details',`${link.right.stage} · ${link.right.name}`,item.right||[]]
-        ]){
-          const col=node('div',undefined,'mount-evidence-side');
-          col.append(node('div',stageLabel,'mount-side-title'));
-          const detailsList=item[side]||[];
-          if(detailsList.length){
-            for(const material of detailsList){
-              const fileInfo={physical_path:material.physical_path,stageLabel};
-              if(!firstCandidate&&material.physical_path)firstCandidate=fileInfo;
-              const fileCard=node('div',undefined,'mount-file-card'+(activePreviewPath===material.physical_path?' active':''));
-              fileCard.dataset.path=material.physical_path||'';
-              fileCard.title=material.physical_path?`【点击在右侧预览】\n物理位置: ${material.physical_path}`:'点击在右侧预览';
-              fileCard.onclick=()=>renderMountPreview(fileInfo);
-
-              const rawName=(material.physical_path||'').split(/[\\/]/).pop()||material.logical_path.split(/[\\/]/).pop()||'未知文件';
-              const ext=(rawName.includes('.')?rawName.split('.').pop():'').toLowerCase();
-              let icon='📄 ';
-              if(['jpg','jpeg','png','bmp','gif','webp'].includes(ext))icon='🖼 ';
-              else if(['dwg','dxf'].includes(ext))icon='📐 ';
-              else if(['doc','docx','wps'].includes(ext))icon='📝 ';
-              else if(['xls','xlsx','csv'].includes(ext))icon='📊 ';
-              else if(['zip','rar','7z'].includes(ext))icon='📦 ';
-
-              const fTitleRow=node('div',undefined,'mount-file-main');
-              const fIcon=node('span',icon,'mount-file-icon');
-              const fTitle=node('span',rawName,'mount-file-name');
-              fTitleRow.append(fIcon,fTitle);
-              fileCard.append(fTitleRow);
-
-              if(material.small_dir){
-                const dirTag=node('div','📁 命中小目录: '+material.small_dir,'mount-small-dir-tag');
-                dirTag.title='证据所在小目录: '+material.small_dir;
-                fileCard.append(dirTag);
-              }
-
-              if(material.archive_chain?.length||material.logical_path?.includes('!')){
-                const zipBadge=node('span','📦 提取自压缩包','mount-archive-tag');
-                zipBadge.title='该附件来源于压缩包解压内容';
-                fileCard.append(zipBadge);
-              }
-
-              if(material.physical_path){
-                const btnRow=node('div',undefined,'mount-file-btns');
-                const previewBtn=node('button','👁 预览文件','primary');
-                previewBtn.onclick=e=>{e.stopPropagation();renderMountPreview(fileInfo);};
-                const dirBtn=node('button','📂 打开目录','secondary');
-                dirBtn.onclick=e=>{e.stopPropagation();openWindowsPath(material.physical_path,'select');};
-                const appBtn=node('button','🖥 默认程序打开','secondary');
-                appBtn.onclick=e=>{e.stopPropagation();openWindowsPath(material.physical_path,'open');};
-                btnRow.append(previewBtn,dirBtn,appBtn);
-                fileCard.append(btnRow);
-              }
-              col.append(fileCard);
-            }
-          }else{
-            for(const lpath of logicalList){
-              const fName=lpath.split(/[\\/!]/).pop()||lpath;
-              const card=node('div',undefined,'mount-file-card');
-              card.append(node('div',`📄 ${fName}`,'mount-file-name'));
-              card.title=lpath;
-              col.append(card);
-            }
-          }
-          grid.append(col);
-        }
-        block.append(grid);
-        records.append(block);
-      }
-      if(!data.evidence.length)records.append(node('p','没有符合条件的证据。'));
-      if(data.confirmation?.updated_at)records.append(node('small','最近确认操作：'+(mountLabels[data.confirmation.status]||data.confirmation.status)+' · '+data.confirmation.updated_at+' · '+data.confirmation.actor));
-      label.textContent=`第 ${data.page}/${data.pages} 页 · 共 ${data.count} 条匹配证据`;
-      prev.disabled=page<=1;next.disabled=page>=data.pages;
-      if(autoPreviewFirst&&firstCandidate&&!activePreviewPath){
-        renderMountPreview(firstCandidate);
-      }
-    }catch(error){records.replaceChildren(node('p',error.message));}
+  const cell = (r, stageId) => {
+    const list = r.stages?.[stageId] || [];
+    return node('td', {}, list.length ? list.map(f => mountFolderNode(f, true)) : [node('span', { className: 'mount-missing', textContent: '未关联' })]);
   };
-  prev.onclick=()=>{page--;load();};next.onclick=()=>{page++;load();};
-  search.oninput=()=>{page=1;clearTimeout(timer);timer=setTimeout(load,250);};
-  method.onchange=()=>{page=1;load();};
-  toolbar.append(prev,label,next);
-  container.append(topBar,records,toolbar);
-  load();
-  return container;
-}
-
-function mountRelation(link,blocked,autoPreviewFirst=false){
-  const block=node('div',undefined,'mount-relation-card');
-  const header=node('div',undefined,'mount-relation-header');
-  
-  const titleArea=node('div',undefined,'mount-relation-title-area');
-  const title=node('div',undefined,'mount-relation-title');
-  const sLeft=node('span',link.left.stage,`mount-stage-pill stage-${link.left.stage.toLowerCase()}`);
-  const nameLeft=node('strong',link.left.name,'mount-relation-nodename');
-  const arrow=node('span',' ➔ ','mount-relation-arrow');
-  const sRight=node('span',link.right.stage,`mount-stage-pill stage-${link.right.stage.toLowerCase()}`);
-  const nameRight=node('strong',link.right.name,'mount-relation-nodename');
-  title.append(sLeft,nameLeft,arrow,sRight,nameRight);
-  const badge=node('span',mountLabels[link.status],`mount-status-badge status-${link.status}`);
-  titleArea.append(title,badge,node('small',(link.methods||['M2']).join(' + ')+' · '+(link.ambiguous?'多目录候选':'目录候选')));
-  if(link.m1_validation){
-    const v=link.m1_validation,labels={corroborated:'双方代码相同，M1 佐证',conflict:'双方可靠项目代码冲突，需人工复核',unresolved_ownership:'代码归属不明，保留原附件候选',missing_both:'双方均缺少可靠 M1 代码证据',missing_left:'源目录缺少可靠 M1 代码证据',missing_right:'目标目录缺少可靠 M1 代码证据'};
-    titleArea.append(node('p',`${labels[v.state]||v.state} · ${v.left_codes.join('、')||'未识别'} ↔ ${v.right_codes.join('、')||'未识别'}`,link.conflict?'mount-warning':''));
-  }
-  if(link.ambiguous&&(link.methods||[]).includes('M1'))titleArea.append(node('p','同码多目录：可能涉及不同宗地；逐条确认目录关系，不代表宗地合并。','mount-warning'));
-  if(link.confirmation?.status&&link.status==='review')titleArea.append(node('small',`原人工决定：${mountLabels[link.confirmation.status]}；证据变化需复核`));
-
-  const actionRow=node('div',undefined,'mount-relation-header-actions');
-  for(const [status,label,cls] of [
-    ['confirmed','✓ 确认对应','primary mount-btn-confirm'],
-    ['rejected','✕ 排除','secondary mount-btn-reject'],
-    ['pending','↺ 撤销待确认','secondary'],
-    ['review','⚑ 需复核','secondary mount-btn-review']
-  ]){
-    if(link.status===status)continue;
-    const button=node('button',label,cls);
-    button.disabled=blocked;
-    button.onclick=async e=>{
-      e.stopPropagation();
-      button.disabled=true;
-      try{
-        await api('/api/folder-mount/decision',{
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({id:link.id,signature:link.signature,status})
-        });
-        notify(`已更新关联状态为：${mountLabels[status]}`);
-        await loadMount();
-      }catch(error){
-        button.disabled=false;
-        notify(error.message,true);
+  $('#mountTable').replaceChildren(node('table', { className: 'mount-table mount-projects' }, [
+    node('thead', {}, [node('tr', {}, [
+      node('th', { textContent: '项目 / 锚点大目录' }),
+      ...stageConfig.map(s => node('th', { textContent: `${s.stage_id} ${s.title || s.name}` })),
+      node('th', { textContent: '状态与人工核对' }),
+    ])]),
+    node('tbody', {}, rows.map(r => {
+      const reviewBtn = r.links.length ? node('button', {
+        className: 'primary mount-review-trigger',
+        type: 'button',
+        textContent: `🔍 核对关系与证据 (${r.links.length})`,
+      }) : '';
+      if (reviewBtn) {
+        reviewBtn.onclick = () => openMountReviewDialog({ type: 'project', row: r });
       }
-    };
-    actionRow.append(button);
-  }
-  header.append(titleArea,actionRow);
-  block.append(header);
-
-  if(link.left.folder||link.right.folder){
-    const foldersDetails=node('details',undefined,'mount-relation-folders-collapse');
-    foldersDetails.append(node('summary','📂 查看两端目录实际路径 · 折叠'));
-    const fBox=node('div',undefined,'mount-relation-folders-inner');
-    if(link.left.folder)fBox.append(mountPathNode(link.left.folder,'folder',`源阶段 (${link.left.stage}) 目录：`));
-    if(link.right.folder)fBox.append(mountPathNode(link.right.folder,'folder',`目标阶段 (${link.right.stage}) 目录：`));
-    foldersDetails.append(fBox);
-    block.append(foldersDetails);
-  }
-
-  block.append(mountEvidence(link,autoPreviewFirst));
-  return block;
-}
-
-function findActiveReviewProject(){
-  if(!mountData?.rows?.length)return null;
-  if(activeReviewProjectId){
-    const exact=mountData.rows.find(r=>r.id===activeReviewProjectId);
-    if(exact)return exact;
-  }
-  if(activeReviewFolderIds.length){
-    return mountData.rows.find(r=>Object.values(r.stages).flat().some(f=>activeReviewFolderIds.includes(f.id)))||null;
-  }
-  return null;
-}
-
-function renderMountReviewDialog(project){
-  const dialog=$('mountReviewDialog');
-  if(!dialog||!project)return;
-  activeReviewProjectId=project.id;
-  activeReviewFolderIds=Object.values(project.stages).flat().map(f=>f.id);
-  const running=mountData?.status==='running',blocked=running||mountData?.historical;
-
-  $('mountReviewTitle').textContent=`核对项目：${project.name}`;
-  $('mountReviewSubtitle').textContent=`状态：${mountLabels[project.status]} · 共 ${project.links.length} 条跨阶段对应关系 · ${project.evidence_count} 条匹配证据`;
-
-  const left=$('mountReviewLeft');
-  left.replaceChildren();
-
-  const stageSummary=node('details',undefined,'mount-dialog-stages-collapse');
-  const stageSummaryTitle=node('summary',`📁 查看当前项目在各阶段的原始文件夹清单（共涉及 ${Object.keys(project.stages).filter(k=>(project.stages[k]||[]).length).length} 个阶段）· 点击展开`);
-  stageSummary.append(stageSummaryTitle);
-  const stageSummaryBody=node('div',undefined,'mount-dialog-stages-body');
-  for(const {stage_id:stage} of mountData.stage_config){
-    const folders=project.stages[stage]||[];
-    if(!folders.length)continue;
-    const pathItems=[];
-    for(const f of folders){
-      for(const p of f.paths||[f.folder]){
-        pathItems.push({f,p});
+      const codeBtn = (r.project_codes?.length || r.unresolved_codes?.length) ? node('button', {
+        className: 'secondary mount-review-trigger',
+        type: 'button',
+        textContent: `查看 M1 代码证据 (${(r.project_codes || []).length}/${(r.unresolved_codes || []).length})`,
+      }) : '';
+      if (codeBtn) {
+        const firstDir = Object.values(r.stages || {}).flat()[0]?.id || '';
+        codeBtn.onclick = () => showCodeEvidenceModal(firstDir, `项目「${r.title}」M1 代码证据`);
       }
-    }
-    const stageRow=node('div',undefined,'mount-dialog-stage-item');
-    stageRow.append(node('strong',`${stage}（${pathItems.length} 个目录）：`));
-    for(const {f,p} of pathItems){
-      stageRow.append(mountPathNode(p,'folder',`📂 ${f.name}${f.candidate?' [候选]':''}：`));
-    }
-    stageSummaryBody.append(stageRow);
-  }
-  stageSummary.append(stageSummaryBody);
-  left.append(stageSummary);
+      return node('tr', {}, [
+        node('td', {}, [
+          node('strong', { textContent: r.title }),
+          node('small', { textContent: `${r.anchor_stage} 锚点 · 关联阶段 ${Object.values(r.stages).filter(v => v.length).length}/${stageConfig.length} 个` }),
+          r.project_codes?.length ? node('small', { textContent: `项目代码：${r.project_codes.join('、')}` }) : '',
+          r.unresolved_codes?.length ? node('small', { className: 'mount-warning', textContent: `待核对代码：${r.unresolved_codes.join('、')}` }) : '',
+          r.ambiguous ? node('small', { className: 'mount-warning', textContent: '含一对多/多对多候选，需人工复核' }) : '',
+          r.conflict ? node('small', { className: 'mount-warning', textContent: '含 M1/M2 证据冲突，请核对' }) : '',
+        ]),
+        ...stageConfig.map(s => cell(r, s.stage_id)),
+        node('td', {}, [
+          node('span', { className: `mount-status-badge status-${r.status}`, textContent: mountStatusText(r.status) }),
+          node('small', { textContent: `关系 ${r.links.length} 条 · 证据 ${r.evidence_count} 组 · 方法 ${(r.methods || ['M2']).join('+')}` }),
+          reviewBtn,
+          codeBtn,
+        ]),
+      ]);
+    })),
+  ]));
+};
 
-  if(project.links.length){
-    project.links.forEach((link,idx)=>{
-      left.append(mountRelation(link,blocked,idx===0));
+const renderMount = data => {
+  if (data.stage_config?.length) mountStageConfig = data.stage_config;
+  mountPairs(data.stages);
+  const s = data.summary || {};
+  $('#mountPhase').textContent = `${data.phase || '已就绪'}${data.scanned_at ? ` · Skill 结果生成于 ${data.scanned_at}` : ''}`;
+  $('#mountSummary').textContent = data.rows
+    ? `项目 ${s.projects || 0}｜已人工确认 ${s.project_confirmed || 0}｜待确认候选 ${s.project_pending || 0}｜待复核/冲突 ${s.project_review || 0}｜未关联 ${s.project_unlinked || 0}`
+    : `项目大目录 ${s.folders || 0}｜跨阶段候选关联 ${s.links || 0}｜已人工确认 ${s.confirmed || 0}｜待确认候选 ${s.pending || 0}｜待复核/冲突 ${s.review || 0}｜未关联 ${s.unlinked || 0}`;
+  $('#mountPage').textContent = `${data.page || 1} / ${data.pages || 1}`;
+  $('#mountPrev').disabled = (data.page || 1) <= 1;
+  $('#mountNext').disabled = (data.page || 1) >= (data.pages || 1);
+
+  if (data.projects && $('#mountProjectList')) {
+    const byStage = {};
+    data.projects.forEach(p => { (byStage[p.stage_id] = byStage[p.stage_id] || []).push(p); });
+    const stageDivs = Object.keys(byStage).sort().map(sid => {
+      const projs = byStage[sid];
+      return node('details', { style: 'margin: 6px 0; padding-left: 10px; border-left: 2px solid #cbd5e1;' }, [
+        node('summary', { style: 'cursor:pointer; font-weight:bold;' }, [`${mountStageName(sid)}（共识别 ${projs.length} 个项目大目录）`]),
+        node('ul', { style: 'margin: 4px 0 8px 20px; font-size: 13px;' }, projs.map(p =>
+          node('li', { style: 'margin-bottom:4px;' }, [
+            node('strong', {}, [p.project_name]),
+            node('span', { style: 'color:#64748b; margin-left:8px;' }, [`[相对路径: ${p.project_root}]`]),
+            node('span', { style: 'color:#0f766e; margin-left:8px; font-size:12px;' }, [`(${p.decision_source === 'agent' ? 'Agent研判' : p.decision_source === 'manual' ? '人工锁定' : '规则筛选'}：${p.reason})`]),
+            p.boundary_review ? node('span', { className: 'conflict-type-badge type-boundary_review', style: 'margin-left:6px;', textContent: `需复核边界: ${p.boundary_review_reason || p.reason}` }) : '',
+          ])
+        )),
+      ]);
     });
-  }else{
-    left.append(node('p','当前项目暂无跨阶段关联证据。','manager-empty'));
+    $('#mountProjectList').replaceChildren(...stageDivs);
   }
 
-  if(!activePreviewPath){
-    renderMountPreview(null);
-  }
-  if(!dialog.open)dialog.showModal();
-}
+  $('#mountStages').replaceChildren(node('table', { className: 'mount-table' }, [
+    node('thead', {}, [node('tr', {}, ['阶段', '项目大目录', '压缩包', '复用成员', '新解压成员', '失败', '有效材料', '跳过文件'].map(t => node('th', { textContent: t })))]),
+    node('tbody', {}, (data.stages || []).map(st => node('tr', {}, [
+      `${st.stage_id} ${st.name}`, st.business_directories, st.archives, st.reused, st.extracted, st.failed, st.valid_materials,
+      Object.entries(st.skipped || {}).map(([k, v]) => `${k}:${v}`).join(' ') || '0',
+    ].map(v => node('td', { textContent: String(v ?? 0) }))))),
+  ]));
 
-function openMountReview(project){
-  activePreviewPath=null;
-  renderMountReviewDialog(project);
-}
-
-function renderMount(){
-  if(!mountData)return;
-  const data=mountData,running=data.status==='running',blocked=running||data.historical;
-  $('mountScan').disabled=running||!document.querySelector('#mountMethods input:checked:not(:disabled)');
-  $('mountScan').textContent=running?'正在扫描…':'扫描 / 更新目录关联';
-  $('mountPhase').textContent=(data.historical?'历史结果 · ':'')+data.phase+(running&&data.current_stage?' · '+data.current_stage:'')+(data.total?` · ${data.processed}/${data.total}`:'')+(running&&data.current_archive?' · '+data.current_archive.split(/[\\/]/).pop():'');
-  $('mountPhase').title=[data.source_root,data.current_archive,data.current_member,data.scanned_at?'最近成功快照：'+data.scanned_at:''].filter(Boolean).join('\n');
-  $('mountPhase').classList.toggle('mount-warning',Boolean(data.historical)||data.status==='failed'||data.status==='interrupted');
-  const stats=node('table',undefined,'mount-table'),statsHead=node('tr'),statsBody=node('tbody');
-  for(const text of ['阶段','业务目录','压缩包','复用成员','新解压','失败','有效材料'])statsHead.append(node('th',text));
-  const thead=node('thead');thead.append(statsHead);stats.append(thead,statsBody);
-  for(const stage of data.stage_config){const value=data.stages.find(s=>s.stage_id===stage.stage_id)||{};const row=node('tr');for(const text of [stage.stage_id+' · '+stage.name,...['business_directories','archives','reused','extracted','failed','valid_materials'].map(k=>value[k]??'—')])row.append(node('td',String(text)));statsBody.append(row);}
-  $('mountStages').replaceChildren(stats);
-  $('mountPage').textContent=`第 ${data.page}/${data.pages} 页 · 筛选 ${data.count} 条 · 每页50条`;mountPage=data.page;
-  $('mountPrev').disabled=mountPage<=1;$('mountNext').disabled=mountPage>=data.pages;
-  const s=data.summary;$('mountSummary').textContent=`${s.projects??0} 个项目${data.inventory_only?'目录':''} · 待匹配 ${s.project_unscanned??0} · 已确认 ${s.project_confirmed??0} · 候选 ${s.project_pending??0} · 需复核 ${s.project_review??0} · 未找到对应 ${s.project_unlinked??0}`;
-  if(data.m1_statistics){const m=data.m1_statistics;$('mountSummary').textContent+=` · M1 有代码 ${m.projects_with_codes} / 不同代码 ${m.distinct_codes} / 候选 ${m.cross_stage_candidates} / 歧义 ${m.ambiguous} / 冲突 ${m.conflicts} / 未识别 ${m.unrecognized_projects}`;}
-  if(data.m1_statistics){const button=node('button','查看全部 M1 代码证据 / 归属复核','secondary');button.onclick=openCodeEvidence;$('mountSummary').append(button);}
-  if(data.skip_statistics)$('mountSummary').title=JSON.stringify(data.skip_statistics);
-  if(data.inventory_only)$('mountPhase').textContent=(running?'正在检查材料':'材料检查有异常')+' · 当前显示真实项目目录，尚未生成对应关系';
-  $('mountErrors').classList.toggle('hidden',!data.errors.length);
-  const errBox=$('mountErrorText');
-  errBox.replaceChildren();
-  for(const item of data.errors){
-    const line=mountPathNode(item.physical_path||item.path,'select',`⚠ ${item.error}${item.page?' · page='+item.page:''}${item.remaining?' · 尚余 '+item.remaining+' 页':''} · `);
-    errBox.append(line);
+  if (data.m1_statistics) {
+    const m1 = data.m1_statistics;
+    $('#mountStages').append(node('p', {
+      textContent: `M1 统计：含代码目录 ${m1.projects_with_codes || 0}｜唯一项目代码 ${m1.distinct_codes || 0}｜M1 跨阶段关联 ${m1.cross_stage_candidates || 0}｜M1/M2 冲突 ${m1.conflicts || 0}｜代码归属不明 ${m1.unresolved_ownership || 0}｜过滤无效代码 ${m1.invalid_evidence || 0}`,
+    }));
   }
-  // 动态渲染全部七个阶段表头与单元格
-  const table=node('table',undefined,'mount-table mount-projects'),head=node('thead'),tr=node('tr'),body=node('tbody');
-  tr.append(node('th','业务项目大目录'));
-  for(const stage of data.stage_config||[]){
-    tr.append(node('th',stage.stage_id+' · '+(stage.title||stage.name)));
-  }
-  tr.append(node('th','状态 / 核对'));
-  head.append(tr);table.append(head,body);
 
-  for(const project of data.rows||[]){
-    const row=node('tr'),name=node('td');name.append(node('strong',project.name));row.append(name);
-    for(const stage of data.stage_config||[]){
-      row.append(mountProjectCell(project.stages[stage.stage_id]||[]));
-    }
-    const actions=node('td');actions.append(node('span',mountLabels[project.status],`mount-status-badge status-${project.status}`));
-    if(project.ambiguous)actions.append(node('small','多个候选，需核对','mount-warning'));
-    if(project.links.length){
-      const reviewBtn=node('button',`🔍 核对 ${project.links.length} 条对应 · ${project.evidence_count} 份证据`,'primary mount-review-trigger');
-      reviewBtn.onclick=()=>openMountReview(project);
-      actions.append(reviewBtn);
-    }else{
-      actions.append(node('small',data.inventory_only?'材料准备完成后匹配':'当前方法未匹配到，不代表项目不存在'));
-    }
-    row.append(actions);body.append(row);
-  }
-  $('mountTable').replaceChildren(table);
-  if(!body.children.length)$('mountTable').append(node('p',running?'正在检查真实数据源材料，完成后更新七阶段项目大目录表。':'暂无符合条件的项目。','manager-empty'));
+  $('#mountChains div').replaceChildren(
+    node('p', { textContent: data.chains_truncated ? '已人工确认关联链超过 200 条，仅显示前 200 条。' : `共 ${(data.chains || []).length} 条已人工确认的多阶段关联链。` }),
+    ...(data.chains || []).map(c => node('div', { className: 'mount-evidence', textContent: c.map(x => `${x.stage}:${x.name}`).join(' → ') }))
+  );
 
-  // 渲染大模型研判存库的项目大目录列表
-  if($('mountProjectCatalogContent')&&data.projects?.length){
-    const pTable=node('table',undefined,'mount-table'),pHead=node('tr'),pBody=node('tbody');
-    for(const h of ['阶段','项目大目录名称','相对路径','置信度','判定理由'])pHead.append(node('th',h));
-    const pThead=node('thead');pThead.append(pHead);pTable.append(pThead,pBody);
-    for(const p of data.projects){
-      const pRow=node('tr');
-      pRow.append(node('td',p.stage_id+' · '+(p.stage_name||'')));
-      pRow.append(node('td',p.project_name));
-      pRow.append(node('td',p.project_root));
-      pRow.append(node('td',p.confidence||'high'));
-      pRow.append(node('td',p.reason||''));
-      pBody.append(pRow);
-    }
-    $('mountProjectCatalogContent').replaceChildren(pTable);
-  }
-  $('mountChains').replaceChildren(...data.chains.map(chain=>node('p',chain.map(f=>f.stage+' · '+f.name).join(' → '))));
-  if(!data.chains.length)$('mountChains').append(node('p','尚无连续两条以上的人工确认关系。相邻候选不会自动生成确定链路。'));
+  $('#mountErrors summary').textContent = `未读取或异常材料清单（${(data.errors || []).length}）`;
+  $('#mountErrors pre').textContent = (data.errors || []).map(e => `${e.stage || ''} ${e.path}: ${e.error}`).join('\n') || '无';
 
-  if($('mountReviewDialog')?.open){
-    const updatedProject=findActiveReviewProject();
-    if(updatedProject)renderMountReviewDialog(updatedProject);
+  if (data.rows) {
+    renderProjectMountTable(data);
+    return;
   }
-}
 
-async function loadMount(){
-  clearTimeout(mountTimer);const current=++mountRequest;
-  try{const data=await api('/api/folder-mount?'+mountParams());if(current!==mountRequest)return;mountData=data;renderMount();if(data.status==='running')mountTimer=setTimeout(loadMount,1500);}
-  catch(error){if(current!==mountRequest)return;$('mountPhase').textContent=error.message;$('mountScan').disabled=false;}
-}
-$('mountScan').onclick=async()=>{try{$('mountScan').disabled=true;const methods=Array.from(document.querySelectorAll('#mountMethods input:checked:not(:disabled)'),input=>input.value);await api('/api/folder-mount/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({methods})});mountPage=1;await loadMount();}catch(error){renderMount();notify(error.message,true);}};
-$('mountMethods').onchange=renderMount;
-$('mountQuery').oninput=()=>{mountPage=1;clearTimeout(mountSearchTimer);mountSearchTimer=setTimeout(loadMount,250);};
-$('mountFilter').onchange=$('mountPair').onchange=$('mountMethodFilter').onchange=()=>{mountPage=1;loadMount();};
-$('mountPrev').onclick=()=>{mountPage--;loadMount();};$('mountNext').onclick=()=>{mountPage++;loadMount();};loadMount();
+  if ($('#mountFilter').value === 'unlinked') {
+    $('#mountTable').replaceChildren(node('table', { className: 'mount-table' }, [
+      node('thead', {}, [node('tr', {}, ['阶段', '未关联项目大目录', '材料数'].map(t => node('th', { textContent: t })))]),
+      node('tbody', {}, (data.unlinked || []).map(f => node('tr', {}, [
+        node('td', { textContent: f.stage }),
+        node('td', {}, [mountFolderNode(f)]),
+        node('td', { textContent: String(f.files) }),
+      ]))),
+    ]));
+    return;
+  }
+
+  const rows = data.links || [];
+  if (!rows.length) {
+    $('#mountTable').replaceChildren(node('div', { className: 'empty-state' }, [
+      node('h3', { textContent: '当前筛选条件下没有目录关联记录' }),
+    ]));
+    return;
+  }
+
+  $('#mountTable').replaceChildren(node('table', { className: 'mount-table' }, [
+    node('thead', {}, [node('tr', {}, ['阶段A项目大目录', '阶段B项目大目录', '关联来源与证据概要', '当前状态', '人工核对操作'].map(t => node('th', { textContent: t })))]),
+    node('tbody', {}, rows.map(link => {
+      const openDialogBtn = node('button', {
+        className: 'primary mount-review-trigger',
+        type: 'button',
+        textContent: `🔍 查看证据与预览 (${link.evidence_count})`,
+      });
+      openDialogBtn.onclick = () => openMountReviewDialog({ type: 'link', link });
+      const methodBadge = mountMethodLabel(link.methods);
+
+      return node('tr', {}, [
+        node('td', {}, [mountFolderNode(link.left)]),
+        node('td', {}, [mountFolderNode(link.right)]),
+        node('td', {}, [
+          node('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:4px;' }, [
+            node('span', { className: 'mount-sha-tag', textContent: `来源: ${methodBadge}` }),
+            node('strong', { textContent: `共 ${link.evidence_count} 组证据` }),
+            link.ambiguous ? node('span', { className: 'conflict-type-badge type-multi_parcel_same_code', textContent: '一对多/多对多候选' }) : '',
+            link.conflict ? node('span', { className: 'conflict-type-badge', textContent: 'M1/M2证据矛盾' }) : '',
+          ]),
+          link.m1_validation ? node('p', { className: link.conflict ? 'mount-warning' : '', textContent: `M1 校验：${link.m1_validation.state}（${link.m1_validation.reason || '一致'}）` }) : '',
+          openDialogBtn,
+        ]),
+        node('td', {}, [
+          node('span', { className: `mount-status-badge status-${link.status}`, textContent: mountStatusText(link.status) }),
+          link.confirmation?.updated_at ? node('small', { style: 'display:block;margin-top:4px;color:#64748b;', textContent: `审核于 ${link.confirmation.updated_at}` }) : '',
+        ]),
+        node('td', {}, mountActionButtons(link)),
+      ]);
+    })),
+  ]));
+};
+
+const loadMount = () => {
+  const q = encodeURIComponent($('#mountQuery').value.trim());
+  const status = encodeURIComponent($('#mountFilter').value);
+  const pair = encodeURIComponent($('#mountPair').value);
+  const view = encodeURIComponent($('#mountView').value);
+  const method = encodeURIComponent($('#mountMethodFilter')?.value || 'all');
+  return api(`/api/folder-mount?page=${mountPage}&q=${q}&status=${status}&pair=${pair}&view=${view}&method=${method}`)
+    .then(renderMount)
+    .catch(e => notify(e.message, true));
+};
+
+/* ==================== 2 · 冲突管理视图 ==================== */
+
+const renderConflictCard = item => {
+  const badges = (item.conflict_types || []).map((t, i) =>
+    node('span', { className: `conflict-type-badge type-${t}`, textContent: item.conflict_labels?.[i] || t })
+  );
+
+  if (item.item_type === 'link') {
+    const link = item.link;
+    const methodBadge = mountMethodLabel(item.methods);
+    const viewEvidenceBtn = node('button', {
+      className: 'primary',
+      type: 'button',
+      textContent: `🔍 查看全部证据与原始材料 (${item.evidence_count} 组)`,
+    });
+    viewEvidenceBtn.onclick = () => openMountReviewDialog({ type: 'link', link });
+
+    return node('div', { className: 'conflict-card' }, [
+      node('div', { className: 'conflict-card-head' }, [
+        node('div', { className: 'conflict-badges' }, [
+          node('span', { className: 'mount-stage-pill', textContent: item.pair }),
+          node('span', { className: 'mount-sha-tag', textContent: `来源: ${methodBadge}` }),
+          ...badges,
+        ]),
+        node('span', { className: `mount-status-badge status-${item.status}`, textContent: mountStatusText(item.status) }),
+      ]),
+      item.conflict_reasons?.length
+        ? node('div', { className: 'conflict-reasons', textContent: item.conflict_reasons.join(' ｜ ') })
+        : '',
+      node('div', { className: 'conflict-sides' }, [
+        node('div', { className: 'conflict-side-box' }, [
+          node('small', { style: 'color:#64748b;font-weight:600;', textContent: '冲突甲方项目目录' }),
+          mountFolderNode(item.left, true),
+        ]),
+        node('div', { className: 'conflict-side-box' }, [
+          node('small', { style: 'color:#64748b;font-weight:600;', textContent: '冲突乙方项目目录' }),
+          mountFolderNode(item.right, true),
+        ]),
+      ]),
+      node('div', { className: 'conflict-actions' }, [
+        viewEvidenceBtn,
+        ...mountActionButtons(link),
+      ]),
+      renderAuditHistory(item.confirmation),
+    ]);
+  }
+
+  if (item.item_type === 'code_ownership') {
+    const dir = item.directory || {};
+    const viewCodeBtn = node('button', {
+      className: 'primary',
+      type: 'button',
+      textContent: `🔍 查看该目录全部代码证据与原始材料 (${item.evidence_count} 条)`,
+    });
+    viewCodeBtn.onclick = () => showCodeEvidenceModal(dir.id, `${dir.stage}「${dir.name}」项目代码归属证据`);
+
+    return node('div', { className: 'conflict-card' }, [
+      node('div', { className: 'conflict-card-head' }, [
+        node('div', { className: 'conflict-badges' }, [
+          node('span', { className: 'mount-stage-pill', textContent: dir.stage || item.pair }),
+          node('span', { className: 'mount-sha-tag', textContent: 'M1 代码归属核查' }),
+          ...badges,
+        ]),
+        node('span', { className: 'mount-status-badge status-review', textContent: '待人工核实归属' }),
+      ]),
+      node('div', { className: 'conflict-reasons', textContent: (item.conflict_reasons || []).join(' ｜ ') }),
+      node('div', { className: 'conflict-side-box' }, [
+        mountFolderNode(dir, true),
+        node('p', { style: 'margin:4px 0 0;font-size:11px;color:#1e293b;', textContent: `涉及项目代码：${(item.codes || []).join('、')}` }),
+      ]),
+      node('div', { className: 'conflict-actions' }, [viewCodeBtn]),
+    ]);
+  }
+
+  // item_type === 'directory' (项目文件夹边界存在疑问 / unresolved)
+  const dir = item.directory || {};
+  return node('div', { className: 'conflict-card' }, [
+    node('div', { className: 'conflict-card-head' }, [
+      node('div', { className: 'conflict-badges' }, [
+        node('span', { className: 'mount-stage-pill', textContent: dir.stage || item.pair }),
+        node('span', { className: 'mount-sha-tag', textContent: dir.node_type === 'unresolved' ? 'Agent 判定: 待定(unresolved)' : '目录边界复核' }),
+        ...badges,
+      ]),
+      node('span', { className: 'mount-status-badge status-review', textContent: '边界待复核' }),
+    ]),
+    node('div', { className: 'conflict-reasons', textContent: (item.conflict_reasons || []).join(' ｜ ') }),
+    node('div', { className: 'conflict-side-box' }, [
+      mountFolderNode(dir, true),
+      dir.evidence_paths?.length
+        ? node('small', { style: 'color:#475569;margin-top:4px;', textContent: `关联证据路径：${dir.evidence_paths.join('、')}` })
+        : '',
+    ]),
+  ]);
+};
+
+const renderConflicts = data => {
+  const counts = data.counts || {};
+  const activeType = $('#conflictTypeFilter').value;
+  const chips = [
+    { key: 'all', label: '全部冲突与审核项', count: data.total_items || 0 },
+    { key: 'm1_m2_conflict', label: 'M1和M2证据矛盾', count: counts.m1_m2_conflict || 0 },
+    { key: 'unresolved_ownership', label: '项目代码归属不明', count: counts.unresolved_ownership || 0 },
+    { key: 'multi_parcel_same_code', label: '相同代码涉及多个宗地', count: counts.multi_parcel_same_code || 0 },
+    { key: 'boundary_review', label: '项目文件夹边界存疑', count: counts.boundary_review || 0 },
+    { key: 'shared_attachment', label: '多个目录共用相同附件', count: counts.shared_attachment || 0 },
+    { key: 'stale_confirmation', label: '新证据变化需复核', count: counts.stale_confirmation || 0 },
+    { key: 'audited', label: '已有人工作出决定', count: counts.audited || 0 },
+  ];
+
+  $('#conflictSummaryBar').replaceChildren(...chips.map(c => {
+    const btn = node('button', {
+      type: 'button',
+      className: `conflict-chip ${activeType === c.key ? 'active' : ''}`,
+    }, [
+      node('span', { textContent: c.label }),
+      node('strong', { textContent: String(c.count) }),
+    ]);
+    btn.onclick = () => {
+      $('#conflictTypeFilter').value = c.key;
+      conflictPage = 1;
+      loadConflicts();
+    };
+    return btn;
+  }));
+
+  $('#conflictCountInfo').textContent = `当前筛选共 ${data.count || 0} 项`;
+  $('#conflictPage').textContent = `${data.page || 1} / ${data.pages || 1}`;
+  $('#conflictPrev').disabled = (data.page || 1) <= 1;
+  $('#conflictNext').disabled = (data.page || 1) >= (data.pages || 1);
+
+  const list = data.items || [];
+  if (!list.length) {
+    $('#conflictList').replaceChildren(node('div', { className: 'empty-state' }, [
+      node('h3', { textContent: '当前筛选条件下没有冲突或待复核记录' }),
+    ]));
+    return;
+  }
+  $('#conflictList').replaceChildren(...list.map(renderConflictCard));
+};
+
+const loadConflicts = () => {
+  const ctype = encodeURIComponent($('#conflictTypeFilter').value);
+  const stage = encodeURIComponent($('#conflictStageFilter').value);
+  const method = encodeURIComponent($('#conflictMethodFilter').value);
+  const status = encodeURIComponent($('#conflictStatusFilter').value);
+  const q = encodeURIComponent($('#conflictQuery').value.trim());
+  return api(`/api/folder-mount/conflicts?page=${conflictPage}&conflict_type=${ctype}&stage=${stage}&method=${method}&status=${status}&q=${q}`)
+    .then(renderConflicts)
+    .catch(e => notify(e.message, true));
+};
+
+/* ==================== 事件绑定 ==================== */
+
+document.querySelectorAll('.module-tabs button').forEach(btn => {
+  btn.onclick = () => {
+    const mod = btn.dataset.module;
+    document.querySelectorAll('.module-tabs button').forEach(b => {
+      const active = b === btn;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-pressed', String(active));
+    });
+    $('#mountModule').classList.toggle('hidden', mod !== 'mount');
+    $('#conflictsModule').classList.toggle('hidden', mod !== 'conflicts');
+    if (mod === 'conflicts') loadConflicts();
+    else loadMount();
+  };
+});
+
+$('#mountQuery').oninput = () => { mountPage = 1; loadMount(); };
+$('#mountView').onchange = () => { mountPage = 1; loadMount(); };
+$('#mountMethodFilter').onchange = () => { mountPage = 1; loadMount(); };
+$('#mountPair').onchange = () => { mountPage = 1; loadMount(); };
+$('#mountFilter').onchange = () => { mountPage = 1; loadMount(); };
+$('#mountPrev').onclick = () => { mountPage = Math.max(1, mountPage - 1); loadMount(); };
+$('#mountNext').onclick = () => { mountPage += 1; loadMount(); };
+
+$('#conflictTypeFilter').onchange = () => { conflictPage = 1; loadConflicts(); };
+$('#conflictStageFilter').onchange = () => { conflictPage = 1; loadConflicts(); };
+$('#conflictMethodFilter').onchange = () => { conflictPage = 1; loadConflicts(); };
+$('#conflictStatusFilter').onchange = () => { conflictPage = 1; loadConflicts(); };
+$('#conflictQuery').oninput = () => { conflictPage = 1; loadConflicts(); };
+$('#conflictPrev').onclick = () => { conflictPage = Math.max(1, conflictPage - 1); loadConflicts(); };
+$('#conflictNext').onclick = () => { conflictPage += 1; loadConflicts(); };
+$('#openCodeEvidenceBtn').onclick = () => showCodeEvidenceModal('', '全库 M1 项目代码提取与归属证据');
+
+$('#closeMountReview')?.addEventListener('click', () => {
+  $('#mountReviewDialog')?.close();
+});
+
+loadMount();

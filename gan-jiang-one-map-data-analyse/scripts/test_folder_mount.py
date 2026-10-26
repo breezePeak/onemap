@@ -562,6 +562,55 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(scan_res['links'][0]['left']['name'], '真实子项目A')
         self.assertEqual(scan_res['links'][0]['right']['name'], '人工锁定规划项目A')
 
+    def test_stage1_api_isolation_and_conflicts_and_agent_gate(self):
+        """测试第一阶段禁用业务数据生成与前端扫描 API（返回 403）、冲突管理聚合视图及 Agent 闭环门禁。"""
+        # 1. 构造含多项目批次目录的数据集，验证未做 Agent 研判时 find_pending_complex_directories 能检出
+        self.put(3, '2024年第三批次/子项目1/材料1.pdf', b'batch-1')
+        self.put(3, '2024年第三批次/子项目2/材料2.pdf', b'batch-2')
+        mount_dir = self.base / 'mount'
+        cat = ProjectCatalog(storage_dir=mount_dir, root=self.root)
+        pending = cat.find_pending_complex_directories()
+        self.assertTrue(any(p['stage_id'] == 'S3' and p['rel_path'] == '2024年第三批次' for p in pending))
+        cat.close()
+
+        # 2. 验证第一阶段禁用的 HTTP 接口返回 403
+        for method, path in [
+            ('POST', '/api/folder-mount/scan'),
+            ('POST', '/api/jobs'),
+            ('POST', '/api/current'),
+            ('GET', '/api/jobs'),
+            ('GET', '/api/datafiles'),
+            ('GET', '/api/storage'),
+        ]:
+            payload, status = self.api(path, {'methods': ['M2']} if method == 'POST' else None)
+            self.assertEqual(status, 403, f'{method} {path} should return 403')
+            self.assertIn('第一阶段', payload.get('error', ''))
+
+        # 3. 验证冲突管理接口 /api/folder-mount/conflicts 与审核历史记录
+        self.put(1, '项目C1/共用附件.pdf', b'shared-attachment')
+        self.put(2, '项目C2-甲/共用附件.pdf', b'shared-attachment')
+        self.put(2, '项目C2-乙/共用附件.pdf', b'shared-attachment')
+        state = dict(status='ready', phase='完成')
+        with patch.multiple(server, SOURCE=self.root, BASE=self.base, MOUNT_DIR=mount_dir, MOUNT_STATE=state):
+            result, _ = self.scan()
+            server.write_json(mount_dir / 'result.json', dict(result, scanned_at='2026-10-26T15:30:00'))
+            conflicts_data, status = self.api('/api/folder-mount/conflicts')
+            self.assertEqual(status, 200)
+            self.assertGreaterEqual(conflicts_data['counts']['shared_attachment'], 2)
+            link_item = next(it for it in conflicts_data['items'] if it['item_type'] == 'link')
+            # 确认 -> 标记复核 -> 撤销决定，检查历史记录
+            for dec_status in ('confirmed', 'review', 'pending'):
+                _, s_code = self.api('/api/folder-mount/decision', {
+                    'id': link_item['id'],
+                    'signature': link_item['signature'],
+                    'status': dec_status,
+                })
+                self.assertEqual(s_code, 200)
+            audited_data, _ = self.api('/api/folder-mount/conflicts?conflict_type=audited')
+            audited_item = next(it for it in audited_data['items'] if it['id'] == link_item['id'])
+            self.assertEqual(audited_item['status'], 'pending')
+            self.assertEqual(len(audited_item['confirmation']['history']), 2)
+
 
 if __name__ == '__main__':
     unittest.main()
