@@ -11,7 +11,7 @@
   <section id="mountModule" class="mount-module">
     <div class="mount-controls">
     <fieldset id="mountMethods"><legend>匹配方法</legend>
-      <label><input type="checkbox" value="M1" disabled> M1 项目代码精确关联（暂未实现）</label>
+      <label><input type="checkbox" value="M1"> M1 项目代码精确关联</label>
       <label><input type="checkbox" value="M2" checked> M2 相同附件材料精确关联</label>
       <label><input type="checkbox" value="M3" disabled> M3 空间信息模糊匹配（暂未实现）</label>
       <label><input type="checkbox" value="M4" disabled> M4 属性信息模糊匹配（暂未实现）</label>
@@ -30,18 +30,31 @@
           <option value="S6">S6 · 用地规划</option>
           <option value="S7">S7 · 工程规划</option>
         </optgroup>
-        <optgroup label="常用跨阶段关联组合">
+        <optgroup label="全部跨阶段关联组合">
           <option value="S1-S2">S1 ➔ S2</option>
           <option value="S1-S3">S1 ➔ S3</option>
           <option value="S1-S4">S1 ➔ S4</option>
+          <option value="S1-S5">S1 ➔ S5</option>
+          <option value="S1-S6">S1 ➔ S6</option>
           <option value="S1-S7">S1 ➔ S7</option>
           <option value="S2-S3">S2 ➔ S3</option>
           <option value="S2-S4">S2 ➔ S4</option>
+          <option value="S2-S5">S2 ➔ S5</option>
+          <option value="S2-S6">S2 ➔ S6</option>
+          <option value="S2-S7">S2 ➔ S7</option>
           <option value="S3-S4">S3 ➔ S4</option>
+          <option value="S3-S5">S3 ➔ S5</option>
+          <option value="S3-S6">S3 ➔ S6</option>
+          <option value="S3-S7">S3 ➔ S7</option>
           <option value="S4-S5">S4 ➔ S5</option>
+          <option value="S4-S6">S4 ➔ S6</option>
+          <option value="S4-S7">S4 ➔ S7</option>
+          <option value="S5-S6">S5 ➔ S6</option>
+          <option value="S5-S7">S5 ➔ S7</option>
           <option value="S6-S7">S6 ➔ S7</option>
         </optgroup>
       </select>
+      <select id="mountMethodFilter" aria-label="关联方法"><option value="all">全部方法</option><option value="M1">M1 项目代码</option><option value="M2">M2 相同附件</option></select>
       <input id="mountQuery" placeholder="搜索项目大目录、命中小目录或附件" aria-label="搜索文件夹关联">
       <select id="mountFilter" aria-label="关联状态">
         <option value="all">全部状态</option>
@@ -114,5 +127,5 @@
 <script src="/app.js"></script>
 <script src="/spatial.js"></script>
 <script src="/matching.js"></script>
-<script src="/mount.js?v=7stages"></script>
+<script src="/mount.js?v=m1-v1"></script>
 </body></html>

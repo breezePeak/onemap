@@ -221,7 +221,7 @@ class FolderMountTests(unittest.TestCase):
             _, code = self.api('/api/folder-mount/decision', dict(payload, status='confirmed'))
             self.assertEqual(code, 400)
 
-            self.put(1, 'A/broken.zip', b'broken')
+            self.put(1, 'A/unsafe.zip', zip_bytes({'../outside.pdf': b'unsafe'}))
             old = (directory / 'result.json').read_bytes()
             with patch.object(server, 'SOURCE', self.root), patch.object(server, 'BASE', self.base):
                 server.mount_scan(['M2'])
@@ -231,7 +231,7 @@ class FolderMountTests(unittest.TestCase):
             self.assertTrue(server.mount_view()['errors'])
 
     def test_methods_and_duplicate_submissions_rejected(self):
-        for methods in ([], ['M1'], ['M2', 'M3'], None, 'M2'):
+        for methods in ([], ['M1', 'M1'], ['M2', 'M3'], None, 'M2'):
             with self.subTest(methods=methods):
                 with self.assertRaises(ValueError):
                     validate_methods(methods)

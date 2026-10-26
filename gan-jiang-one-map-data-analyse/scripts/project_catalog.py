@@ -16,7 +16,7 @@ import sqlite3
 
 from source_config import SOURCE, STAGES, STAGE_DICT, STAGE_FOLDER_TO_ID, EXCLUDED_DIRECTORIES
 
-RULE_VERSION = 'project-catalog-7stages-v2-sqlite'
+RULE_VERSION = 'project-catalog-7stages-v3-classification'
 
 # 常见纯业务分类/归档层名称（非项目）
 CLASSIFICATION_DIR_NAMES = {
@@ -52,6 +52,8 @@ def is_pure_classification(name):
     if cleaned in CLASSIFICATION_DIR_NAMES:
         return True
     if re.fullmatch(r'\d{4}(?:年度|年)?', cleaned):
+        return True
+    if re.fullmatch(r'\d{4}(?:年度|年)?(?:用地)?规划条件(?:汇编|材料)?', cleaned):
         return True
     if re.fullmatch(r'\d{4}[-—至]+\d{4}.*报批.*', cleaned):
         return True
@@ -142,12 +144,16 @@ class ProjectCatalog:
             except Exception:
                 pass
 
+        # 旧版分类节点保留在 SQLite 中供追溯，但不再进入可用项目和前缀缓存。
+        self.projects = {key: p for key, p in self.projects.items() if p['status'] == 'manual' or not is_pure_classification(normalize_dir_name(p['project_root'].split('/')[-1]))}
         self.rebuild_prefixes()
 
     def rebuild_prefixes(self):
         """为已存库的项目构建按阶段的前缀索引（深度大的在前，优先匹配最精准的子项目）。"""
         self.stage_prefixes = {sid: [] for sid, _ in STAGES}
         for proj in self.projects.values():
+            if proj['status'] != 'manual' and is_pure_classification(normalize_dir_name(proj['project_root'].split('/')[-1])):
+                continue
             sid = proj['stage_id']
             if sid not in self.stage_prefixes:
                 self.stage_prefixes[sid] = []
@@ -163,6 +169,7 @@ class ProjectCatalog:
             INSERT INTO projects (id, stage_id, stage_name, project_root, project_name, physical_path, depth, reason, confidence, status, files, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+                project_root=excluded.project_root,
                 project_name=excluded.project_name,
                 physical_path=excluded.physical_path,
                 depth=excluded.depth,
@@ -226,11 +233,9 @@ class ProjectCatalog:
         elif stage_id == 'S2':
             first = normalized_parts[0]
             if first == '规划条件盖章版':
-                if len(normalized_parts) >= 3 and not is_material_leaf_dir(normalized_parts[2]):
-                    proj_name = normalized_parts[2]
-                    return '/'.join(rel_path_parts[:3]), proj_name, 'S2规划条件出具项目', 'high'
-                elif len(normalized_parts) >= 2:
-                    return '/'.join(rel_path_parts[:2]), normalized_parts[1], 'S2年份规划条件集', 'medium'
+                for i, part in enumerate(normalized_parts[1:], 1):
+                    if not is_pure_classification(part) and not is_material_leaf_dir(part):
+                        return '/'.join(rel_path_parts[:i + 1]), part, 'S2规划条件出具项目', 'high'
             elif not is_pure_classification(first):
                 return rel_path_parts[0], first, 'S2条件出具业务项目目录', 'high'
 
@@ -331,6 +336,11 @@ class ProjectCatalog:
         proj = self.projects[project_id]
         stage_id = proj['stage_id']
         stage_folder = STAGE_DICT[stage_id]['folder_name']
+        stage_root = self.root / stage_folder
+        if not isinstance(new_root_rel, str) or not new_root_rel.strip() or Path(new_root_rel).is_absolute() or '..' in re.split(r'[/\\]', new_root_rel):
+            raise ValueError('项目边界必须为阶段内相对路径')
+        if not (stage_root / new_root_rel).resolve().is_relative_to(stage_root.resolve()):
+            raise ValueError('项目边界超出阶段目录')
         new_phys = str(self.root / stage_folder / new_root_rel.replace('/', os.sep))
 
         proj['project_root'] = new_root_rel

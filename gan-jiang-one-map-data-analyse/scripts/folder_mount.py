@@ -5,12 +5,14 @@ import hashlib
 import json
 import os
 import re
+import zipfile
 
 from extract_archives import ArchiveRecords, disk_path, file_version
 from inspect_sources import extracted_files, is_office_lock
 from link_stages import digest
 from source_config import STAGES, EXCLUDED_DIRECTORIES
 from project_catalog import ProjectCatalog, normalize_dir_name
+from project_codes import build_code_index, RULE_VERSION as M1_RULE_VERSION
 
 RULE_VERSION = 'M2-project-seven-stage-catalog-v1'
 ARCHIVES = {'.zip', '.rar', '.7z'}
@@ -24,8 +26,16 @@ class PreparationError(ValueError):
 
 
 def validate_methods(methods):
-    if not isinstance(methods, list) or methods != ['M2']:
-        raise ValueError('本轮必须且只能选择 M2 相同附件材料精确关联')
+    if not isinstance(methods, list) or not methods or any(m not in ('M1', 'M2') for m in methods) or len(set(methods)) != len(methods):
+        raise ValueError('请选择 M1、M2 或两种方法联合执行')
+
+
+def preparation_issue(path, value, stage):
+    message = str(value)
+    # 只放行已知单文件损坏或加密；路径、链接、并发变化、工具缺失等仍阻断。
+    skippable = isinstance(value, zipfile.BadZipFile) or message == '加密成员，未提供密码' or message.startswith((
+        '压缩包读取失败（损坏、加密或格式不支持）', '成员解压/校验失败：', 'CRC 校验失败', '成员大小校验失败'))
+    return dict(path=str(path), error=message, stage=stage, category='unreadable_archive' if skippable else 'preparation_safety', blocking=not skippable)
 
 
 def identifier(value):
@@ -46,6 +56,8 @@ def folder_entry(path, source, root, catalog=None):
 
     # 计算相对阶段根目录的相对路径
     sub_parts = parts[1:] if source.endswith('!') else parts[1:]
+    if path.name == '__node__' and sub_parts and sub_parts[-1] == '__node__':
+        sub_parts = sub_parts[:-1]
     rel_stage_path = '/'.join(sub_parts)
     is_dir = path.name == '__node__' or (path.is_dir() if path.exists() else False)
 
@@ -97,7 +109,8 @@ def material_detail(entry):
 
 
 def scan_folders(root, database, cache, progress, methods=None, storage_dir=None, tolerate_corrupted=False):
-    validate_methods(['M2'] if methods is None else methods)
+    methods = ['M2'] if methods is None else methods
+    validate_methods(methods)
     root = Path(root).resolve(); database = Path(database)
     if not root.is_dir():
         raise ValueError('数据源目录不存在或不可访问。')
@@ -105,9 +118,10 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
     catalog = ProjectCatalog(storage_dir=storage_dir, root=root)
     entries = []; errors = []; folders = {}; summaries = []; queue = deque(); processed = set(); active = set(); archive_versions = {}
     records = ArchiveRecords(database.parent, root=root)
+    summary = None
 
-    def report(phase, archive='', member='', done=0, total=0):
-        current_sid = summary['stage_id'] if 'summary' in locals() else 'S1'
+    def report(phase, archive='', member='', done=0, total=0, stage=None):
+        current_sid = stage or (summary['stage_id'] if summary else '')
         progress(dict(phase=phase, current_stage=current_sid, current_archive=archive, current_member=member, processed=done, total=total, stages=summaries, errors=list(errors)))
 
     def add_folder(entry):
@@ -132,13 +146,13 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             folder.update(folder=directories[0], paths=directories)
 
     def error(path, value, summary):
-        errors.append(dict(path=str(path), error=str(value), stage=summary['stage_id']))
+        errors.append(preparation_issue(path, value, summary['stage_id']))
         summary['failed'] += 1
 
     try:
         # 第一步：扫描 7 个阶段目录
         for stage_id, name in STAGES:
-            summary = dict(stage_id=stage_id, name=name, business_directories=0, archives=0, reused=0, extracted=0, failed=0, valid_materials=0)
+            summary = dict(stage_id=stage_id, name=name, business_directories=0, archives=0, reused=0, extracted=0, failed=0, valid_materials=0, skipped={})
             summaries.append(summary)
             branch = root / name
             report('扫描目录')
@@ -207,7 +221,7 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                 counts, nested = records.extract(archive, progress=archive_progress)
                 for field in previous:
                     summary[field] = previous[field] + counts[field]
-                errors.extend(dict(item, stage=summary['stage_id']) for item in records.errors)
+                errors.extend(preparation_issue(item['path'], ValueError(item['error']), summary['stage_id']) for item in records.errors)
 
                 for member in records.members(archive):
                     if member['directory']:
@@ -242,7 +256,7 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                           for dest, version, sha in records.db.execute('SELECT dest,version,sha256 FROM verified')}
 
         # 第四步：计算有效材料 SHA-256 并归属于项目大目录
-        report('建索引', done=0, total=len(entries))
+        report('建索引', done=0, total=len(entries), stage=entries[0]['stage'] if entries else None)
         for number, entry in enumerate(entries, 1):
             path = Path(entry['path'])
             summary = next(s for s in summaries if s['stage_id'] == entry['stage'])
@@ -252,13 +266,15 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                 version = file_version(path)
                 folders[entry['business_directory_id']]['files'] += 1
                 if not version[0] or path.suffix.lower() in ('.prj', '.cpg', '.tmp') or path.name.startswith('.onemap-'):
+                    reason = 'empty_file' if not version[0] else 'sidecar_or_temporary'
+                    summary['skipped'][reason] = summary['skipped'].get(reason, 0) + 1
                     continue
-                fingerprint = next((saved['sha256'] for saved in (updated.get(str(path), {}), cache.get(str(path), {}), verified_cache.get(str(path), {})) if saved.get('version') == version), None)
-                if fingerprint is None:
+                fingerprint = next((saved.get('sha256') for saved in (updated.get(str(path), {}), cache.get(str(path), {}), verified_cache.get(str(path), {})) if saved.get('version') == version and saved.get('sha256')), None)
+                if fingerprint is None and 'M2' in methods:
                     fingerprint = digest(disk_path(path))
                 if file_version(path) != version:
                     raise OSError('扫描时文件发生变化，请重试')
-                updated[str(path)] = dict(version=version, sha256=fingerprint)
+                if fingerprint: updated[str(path)] = dict(version=version, sha256=fingerprint)
                 entry.update(
                     id=identifier(entry['stage'] + ':' + entry['source']),
                     stage_id=entry['stage'],
@@ -297,24 +313,12 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             stages=summaries,
             materials=materials,
             file_count=len(entries),
-            hashed_count=len(materials),
+            hashed_count=sum(bool(e['sha256']) for e in materials),
+            methods=methods,
             rule_version=RULE_VERSION
         )
 
-        for path, version in [(e['path'], e['version']) for e in materials] + list(archive_versions.items()):
-            try:
-                if file_version(path) != version:
-                    raise OSError('本轮准备期间文件版本发生变化，请重试')
-            except OSError as value:
-                errors.append(dict(path=path, error=str(value)))
-
-        tolerate = tolerate_corrupted or os.environ.get('ONEMAP_TOLERATE_CORRUPTED', '').lower() in ('1', 'true')
-        blocking_errors = [
-            e for e in errors
-            if e.get('error') != '加密成员，未提供密码' and (
-                not tolerate or '版本发生变化' in e.get('error', '') or '超出' in e.get('error', '')
-            )
-        ]
+        blocking_errors = [e for e in errors if e['blocking']]
         if blocking_errors:
             raise PreparationError(result, updated)
 
@@ -322,7 +326,7 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
         report('目录匹配', done=len(materials), total=len(materials))
         hashes = defaultdict(lambda: defaultdict(list))
         for entry in materials:
-            if entry['kind'] != 'ungrouped':
+            if 'M2' in methods and entry['kind'] != 'ungrouped':
                 hashes[entry['sha256']][entry['stage']].append(entry)
 
         all_stage_ids = [sid for sid, _ in STAGES]
@@ -384,8 +388,53 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             link['signature'] = hashlib.sha256(json.dumps([RULE_VERSION, identities, link['evidence']], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             link['evidence_version'] = link['signature']
             link['evidence_count'] = len(link['evidence'])
+            link['methods'] = ['M2']
+            link['method_signatures'] = {'M2': link['signature']}
+            link['method_evidence'] = {'M2': link['evidence']}
 
+        if 'M1' in methods:
+            code_index, code_links, stats, code_errors = build_code_index(list(folders.values()), materials, catalog, report)
+            result.update(project_code_index=code_index, m1_statistics=stats, m1_rule_version=M1_RULE_VERSION)
+            errors.extend(code_errors)
+            for candidate in code_links:
+                left, right = candidate['left'], candidate['right']
+                ident = identifier(left['id'] + ':' + right['id'])
+                link = links.setdefault(ident, dict(id=ident, left=left, right=right, method='M1', methods=[],
+                    rule_version=RULE_VERSION, skipped_stages=all_stage_ids[all_stage_ids.index(left['stage']) + 1:all_stage_ids.index(right['stage'])],
+                    evidence=[], ambiguous=False, status='pending', method_signatures={}, method_evidence={}))
+                link['methods'] = sorted(set(link['methods']) | {'M1'})
+                link['method'] = '+'.join(link['methods'])
+                link['ambiguous'] |= candidate['ambiguous']
+                link['conflict'] = candidate['conflict']
+                if candidate['conflict']: link['status'] = 'review'
+                signature = hashlib.sha256(json.dumps([M1_RULE_VERSION, left, right, candidate['evidence'], candidate['ambiguous']], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                link['method_signatures']['M1'] = signature
+                link['method_evidence']['M1'] = candidate['evidence']
+                link['evidence'] = candidate['evidence'] + link['evidence']
+                link['signature'] = signature if link['methods'] == ['M1'] else hashlib.sha256(json.dumps(link['method_signatures'], sort_keys=True).encode()).hexdigest()
+                link['evidence_version'] = link['signature']
+                link['evidence_count'] = len(link['evidence'])
+
+        result['skip_statistics'] = dict(materials_seen=len(entries), valid_materials=len(materials),
+            hashed_materials=result['hashed_count'], hashes_disabled='M2' not in methods,
+            reasons={reason: sum(s['skipped'].get(reason, 0) for s in summaries) for reason in {r for s in summaries for r in s['skipped']}},
+            unreadable_archives=sum(e['category'] == 'unreadable_archive' for e in errors))
+
+        for link in links.values():
+            if any(f.get('code_review') for f in (link['left'],link['right'])):
+                link['conflict'] = True
+                link['status'] = 'review'
+            link['review_context'] = identifier(json.dumps([link['ambiguous'], link.get('conflict',False),
+                [[f['id'],f['folder'],f.get('reason')] for f in (link['left'],link['right'])]],ensure_ascii=False))
         result['links'] = sorted(links.values(), key=lambda e: (e['left']['stage'], e['left']['folder'], e['right']['stage'], e['right']['folder']))
+        for path, version in [(e['path'], e['version']) for e in materials] + list(archive_versions.items()):
+            try:
+                if not Path(path).resolve().is_relative_to(root) or file_version(path) != version:
+                    raise OSError('本轮准备期间文件路径或版本发生变化，请重试')
+            except OSError as value:
+                errors.append(preparation_issue(path, value, ''))
+        if any(e['blocking'] for e in errors):
+            raise PreparationError(result, updated)
         report('完成', done=len(materials), total=len(materials))
         return result, updated
     finally:
@@ -447,6 +496,8 @@ def project_rows(result):
         rejected = [link for link in links if find(link['left']['id']) == root and link.get('status') == 'rejected']
         statuses = {link.get('status', 'pending') for link in evidence}
         status = 'review' if 'review' in statuses else 'pending' if 'pending' in statuses else 'confirmed' if evidence else 'rejected' if rejected else 'unlinked'
+        if not evidence and any(f.get('code_review') for key in reached for f in groups[key]):
+            status = 'review'
         if result.get('inventory_only'):
             status = 'unscanned'
         anchor = min(groups[root], key=lambda f: (f['stage'], f['name']))
@@ -456,7 +507,7 @@ def project_rows(result):
             stages=stages,
             status=status,
             ambiguous=any(len(values) > 1 for values in stages.values()) or any(e.get('ambiguous') for e in evidence),
-            links=[{k: v for k, v in link.items() if k != 'evidence'} for link in evidence + rejected],
+            links=[{k: v for k, v in link.items() if k not in ('evidence', 'method_evidence')} for link in evidence + rejected],
             evidence_count=sum(link['evidence_count'] for link in evidence)
         ))
     return rows

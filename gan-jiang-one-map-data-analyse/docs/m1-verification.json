@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-26",
+  "base_commit": "3d60cd29b1100b1cacecb95dcc907227ed542e12",
+  "python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "source": "F:/项目数据/赣江一张图",
+  "baseline_scope": "原始HEAD源码在work/m1-baseline-source隔离运行",
+  "logs": {
+    "m1-baseline-tests.log": {
+      "tests": 106,
+      "seconds": 15.617,
+      "passed": true,
+      "sha256": "46116a6f162a9dbfc60329325c629c89d2f26aba873105d1ca3ba5122d205296"
+    },
+    "m1-regression-tests.log": {
+      "tests": 121,
+      "seconds": 25.652,
+      "passed": true,
+      "sha256": "d8086225ace5c24d1ef621d3573269453ac34b3f78da7df02398372dd9ade6b3"
+    },
+    "m1-ui-tests.log": {
+      "passed": true,
+      "sha256": "3be3b5c0725e7a28631dd1d607dd60b8382969e936a94c15567e5f97d571451b"
+    },
+    "m1-real-sample.log": {
+      "passed": true,
+      "sha256": "ba2bc4024be64a7554c1bb442de0be93cc233932725bc676d682301c32c7a09a"
+    }
+  },
+  "m1_test_count": 15,
+  "m1_tests": [
+    "test_normalization_preserves_raw_and_rejects_partial_other_identifiers_and_ocr",
+    "test_all_methods_validated",
+    "test_s1_s7_names_and_subdirectory_sources_without_hashing",
+    "test_body_structured_filename_and_text_cache_invalidation",
+    "test_native_pdf_docx_xlsx_and_existing_native_cache",
+    "test_docx_table_and_xlsx_code_column_preserve_real_locations",
+    "test_conflicting_codes_and_one_to_many_candidates",
+    "test_one_to_many_without_conflict_remains_separate_pending_candidates",
+    "test_name_similarity_and_partial_codes_do_not_link",
+    "test_union_deduplicates_and_preserves_m2_decision_and_evidence",
+    "test_s2_year_classification_and_legacy_cache_do_not_absorb_projects",
+    "test_progress_and_skip_statistics",
+    "test_archive_policy_shared_by_web_and_script_and_security_blocks",
+    "test_method_status_pair_filters_and_pagination",
+    "test_manual_boundary_saved_and_source_move_requires_review"
+  ],
+  "real_sample": {
+    "projects_with_codes": 8,
+    "distinct_codes": 5,
+    "cross_stage_candidates": 3,
+    "ambiguous": 0,
+    "conflicts": 0,
+    "invalid_evidence": 0,
+    "unrecognized_projects": 3,
+    "unlinked_projects": 5,
+    "read_errors": 0,
+    "unrecognized_fields": 0,
+    "skipped_body": {
+      "ungrouped_material": 6
+    }
+  },
+  "checks": {
+    "python_regression": true,
+    "browser_interactions": true,
+    "javascript_syntax": true,
+    "git_diff_whitespace": true,
+    "real_data_sample": true,
+    "full_real_data_scan": false
+  },
+  "limits": [
+    "真实数据仅25份复制抽样，其中24份有效，非全量或随机样本",
+    "没有执行全量OCR、M3或制表",
+    "元数据保持不变的原位改写需清缓存",
+    "同码不证明同宗地，人工审核必需"
+  ]
+}

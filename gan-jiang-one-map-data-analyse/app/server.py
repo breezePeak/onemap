@@ -58,7 +58,9 @@ def mount_scan(methods=None):
         with MOUNT_LOCK:
             write_json(MOUNT_DIR/'hashes.json',cache)
             write_json(MOUNT_DIR/'result.json',dict(result,scanned_at=datetime.now().isoformat(timespec='seconds')))
-            phase='完成（含暂不处理的加密材料）' if result.get('errors') else '完成'
+            for method in result['methods']:
+                write_json(MOUNT_DIR/f'result-{method}.json',dict(result,scanned_at=datetime.now().isoformat(timespec='seconds')))
+            phase='完成（含未读取材料，请核对异常）' if result.get('errors') else '完成'
             mount_update(status='ready',phase=phase,errors=result.get('errors',[]),stages=result.get('stages',[]))
     except PreparationError as error:
         write_json(MOUNT_DIR/'hashes.json',error.cache)
@@ -84,7 +86,12 @@ def mount_result():
         link.setdefault('evidence_count',len(link.get('evidence',[])))
         decision=decisions.get(link['id'],{})
         same=decision.get('signature')==link['signature'] and result.get('rule_version')==RULE_VERSION
-        link['status']=decision.get('status','pending') if same else ('review' if decision.get('status') in ('confirmed','rejected','review') else 'pending')
+        if decision.get('review_context'):
+            same = same and decision['review_context']==link.get('review_context')
+        elif link.get('ambiguous') or link.get('conflict') or any(f.get('reason')=='人工手动指定项目大目录边界' for f in (link['left'],link['right'])):
+            same = False
+        link['method_statuses']={method: (decision.get('status','pending') if decision.get('method_signatures',{}).get(method, decision.get('signature') if method=='M2' else None)==signature else 'pending') for method,signature in link.get('method_signatures',{'M2':link['signature']}).items()}
+        link['status']=decision.get('status',link.get('status','pending')) if same else ('review' if decision.get('status') in ('confirmed','rejected','review') else link.get('status','pending'))
         link['confirmation']=decision
     return result
 
@@ -136,16 +143,17 @@ def mount_view(params=None):
     params=params or {}; result=mount_result(); state=dict(MOUNT_STATE)
     if state['status']=='idle' and result.get('scanned_at'): state.update(status='ready',phase='已载入上次扫描结果')
     historical=bool(result.get('scanned_at')) and (state['status']!='ready' or result.get('rule_version')!=RULE_VERSION)
-    query=params.get('q',[''])[0].casefold(); status=params.get('status',['all'])[0]; pair=params.get('pair',['all'])[0]
+    query=params.get('q',[''])[0].casefold(); status=params.get('status',['all'])[0]; pair=params.get('pair',['all'])[0]; method=params.get('method',['all'])[0]
     links=result['links']; linked={f['id'] for link in links for f in (link['left'],link['right']) if 'id' in f}
     unlinked=[f for f in result['folders'] if f.get('id') not in linked]
     filtered=[e for e in (unlinked if status=='unlinked' else links)
               if (status in ('all','unlinked') or e['status']==status)
               and (pair=='all' or (e['stage'] in pair.split('-') if status=='unlinked' else e['left']['stage']+'-'+e['right']['stage']==pair))
               and query in mount_search(e)]
+    if method!='all': filtered=[e for e in filtered if method in e.get('methods',[e.get('method','M2')])]
     requested_page=max(1,int(params.get('page',['1'])[0])); pages=max(1,(len(filtered)+49)//50); page=min(requested_page,pages)
     visible=filtered[(page-1)*50:page*50]
-    compact=lambda link:{k:v for k,v in link.items() if k!='evidence'}
+    compact=lambda link:{k:v for k,v in link.items() if k not in ('evidence','method_evidence')}
     chains=[]
     outgoing={}
     for link in links:
@@ -163,10 +171,12 @@ def mount_view(params=None):
                 errors=state.get('errors',result.get('errors',[])),historical=historical,scanned_at=result.get('scanned_at'),
                 summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked)),
                 page=page,pages=pages,count=len(filtered),chains=chains,chains_truncated=len(chains)>=200)
+    response.update(methods=result.get('methods',['M2']),m1_statistics=result.get('m1_statistics'),skip_statistics=result.get('skip_statistics'))
     if params.get('view',[''])[0]=='projects':
         rows=project_rows(result)
         chosen=[row for row in rows if (status=='all' or row['status']==status)
-                and (pair=='all' or bool(row['stages'].get(pair))) and query in mount_search(row)]
+                and (pair=='all' or (bool(row['stages'].get(pair)) if '-' not in pair else any(link['left']['stage']+'-'+link['right']['stage']==pair for link in row['links'])))
+                and (method=='all' or any(method in link.get('methods',[link.get('method','M2')]) for link in row['links'])) and query in mount_search(row)]
         pages=max(1,(len(chosen)+49)//50); page=min(requested_page,pages)
         response.update(rows=chosen[(page-1)*50:page*50],page=page,pages=pages,count=len(chosen),inventory_only=result.get('inventory_only',False))
         response['summary'].update(projects=len(rows),project_confirmed=sum(r['status']=='confirmed' for r in rows),project_pending=sum(r['status']=='pending' for r in rows),project_review=sum(r['status']=='review' for r in rows),project_unlinked=sum(r['status']=='unlinked' for r in rows),project_unscanned=sum(r['status']=='unscanned' for r in rows))
@@ -322,7 +332,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not link: raise FileNotFoundError('目录关系不存在。')
                     params=parse_qs(urlsplit(self.path).query); page=max(1,int(params.get('page',['1'])[0]))
                     query=params.get('q',[''])[0].casefold()
-                    evidence=[e for e in link.get('evidence',[]) if query in mount_search(e)]
+                    method=params.get('method',['all'])[0]
+                    evidence=[e for e in link.get('evidence',[]) if query in mount_search(e) and (method=='all' or e.get('method','M2')==method)]
                     pages=max(1,(len(evidence)+19)//20); page=min(page,pages)
                     return self.json(dict(id=link['id'],signature=link['signature'],confirmation=link.get('confirmation'),evidence=evidence[(page-1)*20:page*20],page=page,pages=pages,count=len(evidence)))
             if parts==['api','storage']:
@@ -421,7 +432,9 @@ class Handler(BaseHTTPRequestHandler):
                 payload=json.loads(self.body(65536))
                 with MOUNT_LOCK:
                     catalog=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
-                    updated=catalog.update_project_boundary(payload.get('project_id'),payload.get('new_root_rel'),payload.get('new_name'))
+                    try: updated=catalog.update_project_boundary(payload.get('project_id'),payload.get('new_root_rel'),payload.get('new_name'))
+                    finally: catalog.close()
+                    mount_update(status='interrupted',phase='目录边界已调整，请重新扫描并复核关联')
                     return self.json(dict(updated=updated))
             if parts==['api','folder-mount','scan']:
                 payload=json.loads(self.body(65536)); validate_methods(payload.get('methods'))
@@ -443,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                     previous=decisions.get(link['id'],{})
                     history=previous.get('history',[])
                     if previous: history=history+[{k:v for k,v in previous.items() if k!='history'}]
-                    decisions[link['id']]=dict(status=status,signature=link['signature'],rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
+                    decisions[link['id']]=dict(status=status,signature=link['signature'],review_context=link.get('review_context'),method_signatures=link.get('method_signatures',{'M2':link['signature']}),rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
                     write_json(MOUNT_DIR/'decisions.json',decisions)
                     return self.json(mount_view())
             if parts in (['api','jobs'],['api','current']):

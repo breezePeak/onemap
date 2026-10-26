@@ -129,10 +129,11 @@ def main():
         try:
             path=Path(document['path']);stat=path.stat();cache_key=str(path)
             cached=text_cache.get(cache_key)
-            if not cached or cached['size']!=stat.st_size or cached['mtime_ns']!=stat.st_mtime_ns:
+            if not cached or cached['size']!=stat.st_size or cached['mtime_ns']!=stat.st_mtime_ns or cached.get('ctime_ns')!=stat.st_ctime_ns:
                 try:cached=dict(size=stat.st_size,mtime_ns=stat.st_mtime_ns,pages=read_pdf_text(path))
                 except subprocess.TimeoutExpired:cached=dict(size=stat.st_size,mtime_ns=stat.st_mtime_ns,pages=[],error='PDF 原生文字提取超过45秒，保留材料供渲染和OCR；本任务不重复解析同一版本')
                 except subprocess.CalledProcessError as e:cached=dict(size=stat.st_size,mtime_ns=stat.st_mtime_ns,pages=[],error='PDF 原生文字解析失败：'+(e.stderr or str(e))[-2000:])
+                cached['ctime_ns']=stat.st_ctime_ns
                 text_cache[cache_key]=cached
             if cached.get('error'):failures.append(dict(source=document['source'],error=cached['error']))
             for page_no,text in enumerate(cached['pages'],1):texts.append(dict(project=document['project'],retrieval_projects=document['retrieval_projects'],source=document['source'],page=page_no,text=text,retrieval_reason=document.get('retrieval_reason')))

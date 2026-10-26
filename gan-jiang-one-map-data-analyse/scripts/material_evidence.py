@@ -7,7 +7,7 @@ from match_engine import normalize
 
 CERTIFICATE_NUMBER=r'[A-Z0-9]{12,28}号?(?![A-Z0-9])'
 PATTERNS={
-    'project_code':r'(?<!\d)\d{4}[-一—－]\d{6}[-一—－]\d{2}[-一—－]\d{2}[-一—－]\d{6}(?!\d)',
+    'project_code':r'(?<![A-Z0-9])\d(?:\s*\d){3}\s*[-一—–－−]\s*\d(?:\s*\d){5}\s*[-一—–－−]\s*\d(?:\s*\d)\s*[-一—–－−]\s*\d(?:\s*\d)\s*[-一—–－−]\s*\d(?:\s*\d){5}(?![A-Z0-9])',
     'regulator_id':r'(?<![A-Z0-9])\d{6}20\d{2}[AB]\d{4,6}(?![A-Z0-9])',
     'contract_id':r'(?<![A-Z0-9])H\d{14,18}(?![A-Z0-9])',
     'unit_id':r'(?<![A-Z0-9])\d{12}[A-Z]{2}\d{5}[A-Z]\d{8}(?![A-Z0-9])',
@@ -25,7 +25,7 @@ def compact_text(text):
 
 
 def canonical_code(value):
-    return re.sub(r'[一—－]','-',value)
+    return re.sub(r'[一—–－−]', '-', compact_text(value))
 
 
 def page_evidence(text,targets):

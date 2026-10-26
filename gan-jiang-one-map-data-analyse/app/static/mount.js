@@ -9,7 +9,7 @@ document.querySelectorAll('[data-module]').forEach(button=>button.onclick=()=>{
 
 if($('closeMountReview'))$('closeMountReview').onclick=()=>{$('mountReviewDialog').close();activeReviewProjectId=null;activeReviewFolderIds=[];};
 
-function mountParams(){return new URLSearchParams({view:'projects',q:$('mountQuery').value.trim(),status:$('mountFilter').value,pair:$('mountPair').value,page:String(mountPage)});}
+function mountParams(){return new URLSearchParams({view:'projects',q:$('mountQuery').value.trim(),status:$('mountFilter').value,method:$('mountMethodFilter').value,pair:$('mountPair').value,page:String(mountPage)});}
 
 function mountPathNode(path,action='folder',prefix='📂 '){
   const label=node('div',prefix+path,'manager-path clickable-path');
@@ -73,7 +73,7 @@ function renderMountPreview(fileInfo){
   const body=node('div',undefined,'mount-preview-body');
   if(ext==='pdf'){
     const frame=node('iframe');
-    frame.src=fileUrl;
+    frame.src=fileUrl+(fileInfo.page?'#page='+fileInfo.page:'');
     frame.className='mount-preview-frame';
     frame.title=fileName;
     body.append(frame);
@@ -114,20 +114,39 @@ function renderMountPreview(fileInfo){
 function mountEvidence(link,autoPreviewFirst=false){
   const container=node('div',undefined,'mount-evidence-container');
   const topBar=node('div',undefined,'mount-evidence-topbar');
-  topBar.append(node('strong',`共 ${link.evidence_count} 份相同附件证据`));
-  const search=node('input');search.placeholder='搜索文件名或哈希';search.setAttribute('aria-label','搜索材料证据');
+  topBar.append(node('strong',`${(link.methods||['M2']).join(' + ')} · 共 ${link.evidence_count} 条证据`));
+  const method=node('select');method.setAttribute('aria-label','证据方法');
+  for(const [value,title] of [['all','全部证据'],['M1','M1 项目代码'],['M2','M2 相同附件']]){const option=node('option',title);option.value=value;method.append(option);}
+  topBar.append(method);
+  const search=node('input');search.placeholder='搜索项目代码、文件名或哈希';search.setAttribute('aria-label','搜索材料证据');
   topBar.append(search);
   const records=node('div',undefined,'mount-evidence-list'),toolbar=node('div',undefined,'mount-toolbar'),prev=node('button','上一页','secondary'),next=node('button','下一页','secondary'),label=node('span');
   let page=1,request=0,timer;
   const load=async()=>{
     const current=++request;
     try{
-      const data=await api('/api/folder-mount/links/'+encodeURIComponent(link.id)+'?'+new URLSearchParams({page:String(page),q:search.value.trim()}));
+      const data=await api('/api/folder-mount/links/'+encodeURIComponent(link.id)+'?'+new URLSearchParams({page:String(page),q:search.value.trim(),method:method.value}));
       if(current!==request)return;
       records.replaceChildren();
       let firstCandidate=null;
       for(const item of data.evidence){
         const block=node('div',undefined,'mount-evidence');
+        if(item.method==='M1'){
+          block.append(node('strong',`M1 · ${item.normalized_code}`),node('p',item.explanation));
+          for(const side of ['left','right']){
+            for(const source of item[side+'_sources']||[]){
+              const sourceLabel={body_field:'正文字段',structured_field:'结构化字段',filename:'文件名',project_directory:'项目目录',subdirectory:'子目录'}[source.source_type]||source.source_type;
+              block.append(node('p',`${source.normalized_code} ｜ ${source.raw_code} ｜ ${source.stage} ｜ ${source.project_name} ｜ ${sourceLabel} ｜ ${source.location} ｜ ${source.conflict?'证据冲突':mountLabels[link.status]}`));
+              block.append(mountPathNode(source.source_path,source.source_type.includes('directory')?'folder':'select','来源：'));
+              block.append(node('p',source.text_evidence));
+              const preview=node('button','查看来源','secondary');
+              preview.onclick=()=>{if(source.source_type.includes('directory'))openWindowsPath(source.source_path,'folder');else renderMountPreview({physical_path:source.source_path,stageLabel:source.stage,page:/^page=(\d+)$/.exec(source.location)?.[1]});};
+              block.append(preview);
+            }
+          }
+          records.append(block);
+          continue;
+        }
         const shaHeader=node('div',undefined,'mount-sha-header');
         const shaShort=item.sha256?item.sha256.slice(0,12):'';
         const matchTag=node('span','🔒 内容完全一致（附件比对）','mount-sha-tag');
@@ -209,7 +228,7 @@ function mountEvidence(link,autoPreviewFirst=false){
       }
       if(!data.evidence.length)records.append(node('p','没有符合条件的证据。'));
       if(data.confirmation?.updated_at)records.append(node('small','最近确认操作：'+(mountLabels[data.confirmation.status]||data.confirmation.status)+' · '+data.confirmation.updated_at+' · '+data.confirmation.actor));
-      label.textContent=`第 ${data.page}/${data.pages} 页 · 共 ${data.count} 份相同附件`;
+      label.textContent=`第 ${data.page}/${data.pages} 页 · 共 ${data.count} 条匹配证据`;
       prev.disabled=page<=1;next.disabled=page>=data.pages;
       if(autoPreviewFirst&&firstCandidate&&!activePreviewPath){
         renderMountPreview(firstCandidate);
@@ -218,6 +237,7 @@ function mountEvidence(link,autoPreviewFirst=false){
   };
   prev.onclick=()=>{page--;load();};next.onclick=()=>{page++;load();};
   search.oninput=()=>{page=1;clearTimeout(timer);timer=setTimeout(load,250);};
+  method.onchange=()=>{page=1;load();};
   toolbar.append(prev,label,next);
   container.append(topBar,records,toolbar);
   load();
@@ -237,7 +257,8 @@ function mountRelation(link,blocked,autoPreviewFirst=false){
   const nameRight=node('strong',link.right.name,'mount-relation-nodename');
   title.append(sLeft,nameLeft,arrow,sRight,nameRight);
   const badge=node('span',mountLabels[link.status],`mount-status-badge status-${link.status}`);
-  titleArea.append(title,badge);
+  titleArea.append(title,badge,node('small',(link.methods||['M2']).join(' + ')+' · '+(link.ambiguous?'多目录候选':'目录候选')));
+  if(link.confirmation?.status&&link.status==='review')titleArea.append(node('small',`原人工决定：${mountLabels[link.confirmation.status]}；证据变化需复核`));
 
   const actionRow=node('div',undefined,'mount-relation-header-actions');
   for(const [status,label,cls] of [
@@ -304,7 +325,7 @@ function renderMountReviewDialog(project){
   const running=mountData?.status==='running',blocked=running||mountData?.historical;
 
   $('mountReviewTitle').textContent=`核对项目：${project.name}`;
-  $('mountReviewSubtitle').textContent=`状态：${mountLabels[project.status]} · 共 ${project.links.length} 条跨阶段对应关系 · ${project.evidence_count} 份相同附件证据`;
+  $('mountReviewSubtitle').textContent=`状态：${mountLabels[project.status]} · 共 ${project.links.length} 条跨阶段对应关系 · ${project.evidence_count} 条匹配证据`;
 
   const left=$('mountReviewLeft');
   left.replaceChildren();
@@ -313,7 +334,7 @@ function renderMountReviewDialog(project){
   const stageSummaryTitle=node('summary',`📁 查看当前项目在各阶段的原始文件夹清单（共涉及 ${Object.keys(project.stages).filter(k=>(project.stages[k]||[]).length).length} 个阶段）· 点击展开`);
   stageSummary.append(stageSummaryTitle);
   const stageSummaryBody=node('div',undefined,'mount-dialog-stages-body');
-  for(const stage of ['S1','S2','S3','S4']){
+  for(const {stage_id:stage} of mountData.stage_config){
     const folders=project.stages[stage]||[];
     if(!folders.length)continue;
     const pathItems=[];
@@ -354,7 +375,7 @@ function openMountReview(project){
 function renderMount(){
   if(!mountData)return;
   const data=mountData,running=data.status==='running',blocked=running||data.historical;
-  $('mountScan').disabled=running||!document.querySelector('#mountMethods [value="M2"]').checked;
+  $('mountScan').disabled=running||!document.querySelector('#mountMethods input:checked:not(:disabled)');
   $('mountScan').textContent=running?'正在扫描…':'扫描 / 更新目录关联';
   $('mountPhase').textContent=(data.historical?'历史结果 · ':'')+data.phase+(running&&data.current_stage?' · '+data.current_stage:'')+(data.total?` · ${data.processed}/${data.total}`:'')+(running&&data.current_archive?' · '+data.current_archive.split(/[\\/]/).pop():'');
   $('mountPhase').title=[data.source_root,data.current_archive,data.current_member,data.scanned_at?'最近成功快照：'+data.scanned_at:''].filter(Boolean).join('\n');
@@ -367,6 +388,8 @@ function renderMount(){
   $('mountPage').textContent=`第 ${data.page}/${data.pages} 页 · 筛选 ${data.count} 条 · 每页50条`;mountPage=data.page;
   $('mountPrev').disabled=mountPage<=1;$('mountNext').disabled=mountPage>=data.pages;
   const s=data.summary;$('mountSummary').textContent=`${s.projects??0} 个项目${data.inventory_only?'目录':''} · 待匹配 ${s.project_unscanned??0} · 已确认 ${s.project_confirmed??0} · 候选 ${s.project_pending??0} · 需复核 ${s.project_review??0} · 未找到对应 ${s.project_unlinked??0}`;
+  if(data.m1_statistics){const m=data.m1_statistics;$('mountSummary').textContent+=` · M1 有代码 ${m.projects_with_codes} / 不同代码 ${m.distinct_codes} / 候选 ${m.cross_stage_candidates} / 歧义 ${m.ambiguous} / 冲突 ${m.conflicts} / 未识别 ${m.unrecognized_projects}`;}
+  if(data.skip_statistics)$('mountSummary').title=JSON.stringify(data.skip_statistics);
   if(data.inventory_only)$('mountPhase').textContent=(running?'正在检查材料':'材料检查有异常')+' · 当前显示真实项目目录，尚未生成对应关系';
   $('mountErrors').classList.toggle('hidden',!data.errors.length);
   const errBox=$('mountErrorText');
@@ -436,5 +459,5 @@ async function loadMount(){
 $('mountScan').onclick=async()=>{try{$('mountScan').disabled=true;const methods=Array.from(document.querySelectorAll('#mountMethods input:checked:not(:disabled)'),input=>input.value);await api('/api/folder-mount/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({methods})});mountPage=1;await loadMount();}catch(error){renderMount();notify(error.message,true);}};
 $('mountMethods').onchange=renderMount;
 $('mountQuery').oninput=()=>{mountPage=1;clearTimeout(mountSearchTimer);mountSearchTimer=setTimeout(loadMount,250);};
-$('mountFilter').onchange=$('mountPair').onchange=()=>{mountPage=1;loadMount();};
+$('mountFilter').onchange=$('mountPair').onchange=$('mountMethodFilter').onchange=()=>{mountPage=1;loadMount();};
 $('mountPrev').onclick=()=>{mountPage--;loadMount();};$('mountNext').onclick=()=>{mountPage++;loadMount();};loadMount();
