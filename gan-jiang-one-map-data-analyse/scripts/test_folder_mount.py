@@ -258,6 +258,40 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(len(row['stages']['S3']), 2)
         self.assertTrue(all(e['status'] == 'pending' for e in result['links']))
 
+    def test_format_directories_and_cached_pdf_are_not_projects(self):
+        storage = self.base / 'mount'
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        stale = catalog.register_or_find('S3', '2021/批次甲/旧项目', is_dir=True)
+        stale.update(project_root='2021/批次甲/PDF', project_name='PDF')
+        catalog.upsert_db(stale)
+        catalog.save()
+        catalog.close()
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        self.assertNotIn(stale['id'], catalog.projects)
+        for name in ('PDF', 'pdf', 'CAD', 'SHP', 'Word', 'Excel'):
+            project = catalog.register_or_find('S3', f'2021/批次甲/{name}/材料.pdf', is_dir=False)
+            self.assertEqual(project['project_name'], '批次甲')
+        catalog.close()
+
+    def test_archive_project_paths_are_real_and_stale_snapshot_is_filtered(self):
+        self.put(3, '2019——2023年报批附件材料.zip', zip_bytes({'2021/批次甲/PDF/a.pdf': b'shared'}))
+        self.put(4, '项目乙/a.pdf', b'shared')
+        result, _ = self.scan()
+        link = result['links'][0]
+        self.assertEqual(link['left']['name'], '批次甲')
+        self.assertTrue(Path(link['left']['folder']).is_dir())
+        self.assertIn('.zip.解压', link['left']['folder'])
+        self.assertTrue(all(Path(p).is_dir() for p in link['left']['paths']))
+        stale = dict(link['left'], id='stale', name='PDF', folder=str(self.root / 'missing.zip/PDF'))
+        file_node = dict(link['right'], id='file', folder=str(self.root / STAGES[3][1] / '项目乙/a.pdf'))
+        result['folders'].extend([stale, file_node])
+        result['links'].append(dict(link, id='stale-link', left=stale))
+        with patch.object(server, 'MOUNT_DIR', self.base / 'mount'):
+            server.write_json(self.base / 'mount/result.json', result)
+            visible = server.mount_result()
+        self.assertFalse({'stale', 'file'} & {f['id'] for f in visible['folders']})
+        self.assertNotIn('stale-link', {e['id'] for e in visible['links']})
+
     def test_project_boundary_adjustment_persists_and_triggers_rescan(self):
         # 验证人工修改大目录边界并持久化
         catalog = ProjectCatalog(storage_dir=self.base / 'mount', root=self.root)
@@ -271,6 +305,65 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(reloaded.projects[p['id']]['project_name'], '新项目大目录')
         catalog.close()
         reloaded.close()
+
+    def test_m2_format_and_year_containers_never_become_project_roots(self):
+        for number, (stage, _) in enumerate(STAGES, 1):
+            self.put(number, 'PDF/2024年/工程甲/a.pdf', b'shared')
+        result, _ = self.scan()
+        projects = [f for f in result['folders'] if f['kind'] != 'ungrouped']
+        self.assertEqual({f['name'] for f in projects}, {'工程甲'})
+        self.assertEqual(len(projects), 7)
+        self.assertEqual(len(result['links']), 21)
+        with patch.object(server, 'MOUNT_DIR', self.base / 'mount'):
+            server.write_json(self.base / 'mount/result.json', dict(result, scanned_at='test'))
+            visible = server.mount_result()
+        self.assertEqual(len(visible['links']), 21)
+        self.assertTrue(all(Path(f['folder']).is_dir() for f in visible['folders']))
+
+    def test_m2_unassigned_compilation_archive_cannot_link_a_stage_root(self):
+        self.put(3, '2019——2023年报批附件材料.zip', zip_bytes({'loose.pdf': b'shared'}))
+        self.put(4, '项目乙/a.pdf', b'shared')
+        result, _ = self.scan()
+        self.assertEqual(result['links'], [])
+        material = next(e for e in result['materials'] if e['stage'] == 'S3')
+        self.assertEqual(material['kind'], 'ungrouped')
+        folder = next(f for f in result['folders'] if f['id'] == material['business_directory_id'])
+        self.assertEqual(folder['kind'], 'ungrouped')
+
+    def test_m2_successful_history_survives_obsolete_inventory(self):
+        self.put(1, '项目甲/a.pdf', b'shared')
+        self.put(7, '项目乙/a.pdf', b'shared')
+        result, _ = self.scan()
+        result.update(rule_version='previous-seven-stage-rule', scanned_at='previous-success')
+        link = result['links'][0]
+        storage = self.base / 'mount'
+        decisions = {link['id']: dict(status='confirmed', signature=link['signature'], history=[{'status':'pending'}])}
+        with patch.object(server, 'MOUNT_DIR', storage), patch.object(server, 'MOUNT_STATE', dict(status='ready', phase='完成')):
+            server.write_json(storage / 'result.json', result)
+            server.write_json(storage / 'inventory.json', dict(folders=[], stages=[{'stage_id':'S1'}], errors=[], rule_version='old-four-stage'))
+            server.write_json(storage / 'decisions.json', decisions)
+            view = server.mount_view()
+            loaded = server.mount_result()
+        self.assertEqual(len(loaded['links']), 1)
+        self.assertEqual(len(loaded['stages']), 7)
+        self.assertTrue(view['historical'])
+        self.assertEqual(loaded['links'][0]['status'], 'review')
+        self.assertEqual(loaded['links'][0]['confirmation'], decisions[link['id']])
+        self.assertEqual(server.read_json(storage / 'decisions.json'), decisions)
+
+    def test_m2_inventory_fallback_requires_current_rule_and_no_success(self):
+        self.put(1, '项目甲/a.pdf', b'one')
+        result, _ = self.scan()
+        storage = self.base / 'mount'
+        with patch.object(server, 'MOUNT_DIR', storage):
+            inventory = {k:result[k] for k in ('folders', 'stages', 'errors', 'rule_version', 'methods')}
+            server.write_json(storage / 'inventory.json', inventory)
+            loaded = server.mount_result()
+            self.assertTrue(loaded.get('inventory_only'))
+            self.assertEqual(loaded['folders'], result['folders'])
+            inventory['rule_version'] = 'old-four-stage'
+            server.write_json(storage / 'inventory.json', inventory)
+            self.assertEqual(server.mount_result()['folders'], [])
 
     def test_database_priority_cache_avoids_repeated_analysis(self):
         storage = self.base / 'cache_test_mount'

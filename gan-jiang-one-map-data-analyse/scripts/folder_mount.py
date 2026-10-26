@@ -14,7 +14,7 @@ from source_config import STAGES, EXCLUDED_DIRECTORIES
 from project_catalog import ProjectCatalog, normalize_dir_name
 from project_codes import build_code_index, RULE_VERSION as M1_RULE_VERSION
 
-RULE_VERSION = 'M2-project-seven-stage-catalog-v1'
+RULE_VERSION = 'M2-project-seven-stage-catalog-v3-project-boundaries'
 ARCHIVES = {'.zip', '.rar', '.7z'}
 
 
@@ -79,12 +79,23 @@ def folder_entry(path, source, root, catalog=None):
         is_archive_proj = any(part.lower().endswith(('.zip', '.rar', '.7z', '.解压')) for part in rel_stage_path.split('/')) or is_archive_node
         kind = 'archive' if is_archive_proj and (len(sub_parts) <= 2 or is_archive_node) else 'project'
         folder = proj_info['physical_path']
+        # 压缩包逻辑路径不等于解压实体路径，沿实际材料父目录定位项目边界。
+        if not Path(folder).is_dir():
+            stage_root = root / dict(STAGES)[stage]
+            for parent in (path, *path.parents):
+                if parent == stage_root or not parent.is_relative_to(stage_root):
+                    break
+                if parent.is_dir() and normalize_dir_name(parent.name) == normalize_dir_name(proj_info['project_root'].split('/')[-1]):
+                    folder = str(parent)
+                    proj_info['physical_path'] = folder
+                    catalog.upsert_db(proj_info)
+                    break
         reason = proj_info['reason']
         confidence = proj_info['confidence']
     else:
         ident = identifier(f'{stage}:ungrouped')
         name = '未识别大目录材料'
-        kind = 'archive' if (is_archive_node and len(sub_parts) <= 1) else 'ungrouped'
+        kind = 'ungrouped'
         folder = str(root / STAGES[[s[0] for s in STAGES].index(stage)][1])
         reason = '未识别到项目大目录，需人工复核'
         confidence = 'low'

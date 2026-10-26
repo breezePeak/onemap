@@ -84,7 +84,7 @@ def run_pipeline(source=SOURCE, methods=None, verbose=True):
         return result
     except PreparationError as err:
         (mount_dir / 'hashes.json').write_text(json.dumps(err.cache, ensure_ascii=False), encoding='utf-8')
-        (mount_dir / 'inventory.json').write_text(json.dumps({k:err.result[k] for k in ('folders','stages','errors')}, ensure_ascii=False), encoding='utf-8')
+        (mount_dir / 'inventory.json').write_text(json.dumps({k:err.result[k] for k in ('folders','stages','errors','rule_version','methods')}, ensure_ascii=False), encoding='utf-8')
         (mount_dir / 'task.json').write_text(json.dumps(dict(status='failed',phase=str(err),errors=err.result['errors'],stages=err.result['stages']), ensure_ascii=False), encoding='utf-8')
         print(f"\n[阻断异常] {err}")
         raise

@@ -22,11 +22,11 @@ from review_service import JOBS,SOURCE,read_json,write_json,validate_upload,prep
 from storage_info import storage_info
 from folder_mount import scan_folders, validate_methods, PreparationError, RULE_VERSION, identifier, project_rows
 from source_config import STAGES, STAGE_TITLES
-from project_catalog import ProjectCatalog
+from project_catalog import ProjectCatalog, is_material_leaf_dir, normalize_dir_name
 
 def get_catalog_projects():
     cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
-    try: return list(cat.projects.values())
+    try: return [p for p in cat.projects.values() if Path(p['physical_path']).is_dir() and Path(p['physical_path']).resolve().is_relative_to(SOURCE.resolve())]
     finally: cat.close()
 
 from organize_independent_documents import organize_independent_documents
@@ -64,7 +64,7 @@ def mount_scan(methods=None):
             mount_update(status='ready',phase=phase,errors=result.get('errors',[]),stages=result.get('stages',[]))
     except PreparationError as error:
         write_json(MOUNT_DIR/'hashes.json',error.cache)
-        write_json(MOUNT_DIR/'inventory.json',{key:error.result[key] for key in ('folders','stages','errors')})
+        write_json(MOUNT_DIR/'inventory.json',{key:error.result[key] for key in ('folders','stages','errors','rule_version','methods')})
         mount_update(status='failed',phase=str(error),errors=error.result['errors'],stages=error.result['stages'])
     except Exception as error:
         mount_update(status='failed',phase='任务失败',errors=[dict(path=str(SOURCE),error=str(error))])
@@ -75,10 +75,15 @@ def mount_result():
     for folder in result['folders']+[f for link in result['links'] for f in (link['left'],link['right'])]:
         folder.setdefault('id',identifier('legacy:'+folder['folder']))
         folder.setdefault('name',Path(folder['folder']).name)
-    if result.get('rule_version')!=RULE_VERSION and (MOUNT_DIR/'inventory.json').is_file():
+    if not result.get('scanned_at') and (MOUNT_DIR/'inventory.json').is_file():
         inventory=read_json(MOUNT_DIR/'inventory.json')
-        result.update(folders=inventory['folders'],links=[],stages=inventory['stages'],inventory_only=True)
-    result['folders']=[folder for folder in result['folders'] if Path(folder['folder'].split('!',1)[0]).resolve().is_relative_to(SOURCE.resolve())]
+        if inventory.get('rule_version')==RULE_VERSION:
+            result.update(inventory,links=[],inventory_only=True)
+    result['folders']=[folder for folder in result['folders'] if Path(folder['folder']).is_dir()
+                       and Path(folder['folder']).resolve().is_relative_to(SOURCE.resolve())
+                       and (folder.get('reason')=='人工手动指定项目大目录边界' or not is_material_leaf_dir(normalize_dir_name(folder['name'])))]
+    for folder in result['folders']:
+        folder['paths']=[p for p in folder.get('paths',[folder['folder']]) if Path(p).is_dir() and Path(p).resolve().is_relative_to(SOURCE.resolve())]
     allowed={folder['id'] for folder in result['folders']}
     result['links']=[link for link in result['links'] if link['left']['id'] in allowed and link['right']['id'] in allowed]
     decisions=read_json(MOUNT_DIR/'decisions.json',{})

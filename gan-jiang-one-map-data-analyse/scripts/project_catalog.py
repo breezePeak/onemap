@@ -16,7 +16,7 @@ import sqlite3
 
 from source_config import SOURCE, STAGES, STAGE_DICT, STAGE_FOLDER_TO_ID, EXCLUDED_DIRECTORIES
 
-RULE_VERSION = 'project-catalog-7stages-v3-classification'
+RULE_VERSION = 'project-catalog-7stages-v5-all-stage-containers'
 
 # 常见纯业务分类/归档层名称（非项目）
 CLASSIFICATION_DIR_NAMES = {
@@ -64,6 +64,8 @@ def is_pure_classification(name):
 
 def is_material_leaf_dir(name):
     cleaned = re.sub(r'[(（]\d+[)）]$', '', name).strip()
+    if cleaned.casefold() in {'pdf', 'cad', 'shp', 'word', 'excel', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dwg', 'dxf'}:
+        return True
     if cleaned in MATERIAL_SUBDIR_NAMES:
         return True
     if any(k in cleaned for k in ('申请表', '情况说明', '设计方案', '红线图', '四址范围', '证明文件', '宗地面积测量')):
@@ -145,14 +147,14 @@ class ProjectCatalog:
                 pass
 
         # 旧版分类节点保留在 SQLite 中供追溯，但不再进入可用项目和前缀缓存。
-        self.projects = {key: p for key, p in self.projects.items() if p['status'] == 'manual' or not is_pure_classification(normalize_dir_name(p['project_root'].split('/')[-1]))}
+        self.projects = {key: p for key, p in self.projects.items() if p['status'] == 'manual' or not (is_pure_classification(normalize_dir_name(p['project_root'].split('/')[-1])) or is_material_leaf_dir(normalize_dir_name(p['project_root'].split('/')[-1])))}
         self.rebuild_prefixes()
 
     def rebuild_prefixes(self):
         """为已存库的项目构建按阶段的前缀索引（深度大的在前，优先匹配最精准的子项目）。"""
         self.stage_prefixes = {sid: [] for sid, _ in STAGES}
         for proj in self.projects.values():
-            if proj['status'] != 'manual' and is_pure_classification(normalize_dir_name(proj['project_root'].split('/')[-1])):
+            if proj['status'] != 'manual' and (is_pure_classification(normalize_dir_name(proj['project_root'].split('/')[-1])) or is_material_leaf_dir(normalize_dir_name(proj['project_root'].split('/')[-1]))):
                 continue
             sid = proj['stage_id']
             if sid not in self.stage_prefixes:
@@ -222,11 +224,12 @@ class ProjectCatalog:
         if stage_id == 'S1':
             for i, p in enumerate(normalized_parts):
                 if p == '用地预审及选址论证' and i + 1 < len(normalized_parts):
-                    proj_name = normalized_parts[i + 1]
-                    root_rel = '/'.join(rel_path_parts[:i + 2])
-                    return root_rel, proj_name, 'S1解压包内独立选址工程项目', 'high'
+                    for index in range(i + 1, len(normalized_parts)):
+                        proj_name = normalized_parts[index]
+                        if not is_pure_classification(proj_name) and not is_material_leaf_dir(proj_name):
+                            return '/'.join(rel_path_parts[:index + 1]), proj_name, 'S1解压包内独立选址工程项目', 'high'
             proj_name = normalized_parts[0]
-            if not is_pure_classification(proj_name):
+            if not is_pure_classification(proj_name) and not is_material_leaf_dir(proj_name):
                 return rel_path_parts[0], proj_name, 'S1用地预审独立业务项目目录', 'high'
 
         # S2: 条件出具
@@ -236,7 +239,7 @@ class ProjectCatalog:
                 for i, part in enumerate(normalized_parts[1:], 1):
                     if not is_pure_classification(part) and not is_material_leaf_dir(part):
                         return '/'.join(rel_path_parts[:i + 1]), part, 'S2规划条件出具项目', 'high'
-            elif not is_pure_classification(first):
+            elif not is_pure_classification(first) and not is_material_leaf_dir(first):
                 return rel_path_parts[0], first, 'S2条件出具业务项目目录', 'high'
 
         # S3: 批次报批阶段
@@ -262,19 +265,19 @@ class ProjectCatalog:
         # S5: 土地首次登记
         elif stage_id == 'S5':
             for i, p in enumerate(normalized_parts):
-                if p != '土地首次登记附件' and not is_material_leaf_dir(p):
+                if not is_pure_classification(p) and not is_material_leaf_dir(p):
                     return '/'.join(rel_path_parts[:i + 1]), p, 'S5土地首次登记地籍宗地单元', 'high'
 
         # S6: 用地规划
         elif stage_id == 'S6':
             first = normalized_parts[0]
-            if first and not is_pure_classification(first):
+            if first and not is_pure_classification(first) and not is_material_leaf_dir(first):
                 return rel_path_parts[0], first, 'S6用地规划统一审批代码项目目录', 'high'
 
         # S7: 工程规划
         elif stage_id == 'S7':
             first = normalized_parts[0]
-            if first and not is_pure_classification(first):
+            if first and not is_pure_classification(first) and not is_material_leaf_dir(first):
                 return rel_path_parts[0], first, 'S7工程规划统一审批代码项目目录', 'high'
 
         # 通用 fallback

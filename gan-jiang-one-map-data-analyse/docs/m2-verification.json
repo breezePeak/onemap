@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-26",
+  "base_commit": "a1f9c900b6904b26c2cc9a79f1eaa9d78fd2105a",
+  "scope": "M2目录边界、历史快照与失败盘点；保留既有未提交改动",
+  "observed_test_results": {
+    "baseline": "Ran 128 tests in 31.889s; OK (skipped=2)",
+    "before_fix": "Ran 17 tests in 7.814s; FAILED (failures=4)",
+    "m2_after_fix": "Ran 17 tests in 8.095s; OK",
+    "full_regression": "Ran 133 tests in 34.113s; OK (skipped=2)",
+    "browser": "PASS: 七阶段、21组筛选、三种方法参数、联合单行、分方法证据、原文位置及预览、人工审核、分页及筛选请求；无页面异常。"
+  },
+  "regression": {
+    "total": 133,
+    "passed": 131,
+    "skipped": 2,
+    "skip_reason": "Windows策略不允许创建目录junction；清理工具相关测试"
+  },
+  "sample": {
+    "copied_files": 21,
+    "valid_materials": 21,
+    "hashed_count": 21,
+    "folders": 12,
+    "links": 2,
+    "errors": [],
+    "source_versions_unchanged": true
+  },
+  "sample_report_sha256": "72944c236fc94c2178b0cfca8c52bb6e002f3ce9365fda2899b29812763c08af",
+  "checks": {
+    "full_real_source_scan": false,
+    "source_read_only": true,
+    "synthetic_m2_all_21_pairs": true,
+    "m1_regression": true,
+    "browser_interactions": true,
+    "old_decisions_preserved": true,
+    "diff_whitespace": true
+  },
+  "runtime_note": "正式扫描缓存及work下测试日志在其他操作中被清理；测试结果记录来自本轮工具输出，提供报告中的命令重跑。未恢复或覆盖正式快照，部署后须重新扫描。"
+}
