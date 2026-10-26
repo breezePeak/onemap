@@ -67,10 +67,18 @@ def folder_entry(path, source, root, catalog=None):
     else:
         small_dir = '/'.join(sub_parts[:-1]) if len(sub_parts) > 1 else (sub_parts[0] if sub_parts else '')
 
-    # 使用项目大目录仓储引擎（大模型分析/存库规则）识别其所属项目大目录
+    # 使用项目大目录仓储引擎（Agent 存库决策 / 树结构感知研判）识别其所属项目大目录
     if catalog is None:
         catalog = ProjectCatalog(root=root)
-    proj_info = catalog.register_or_find(stage, rel_stage_path, is_dir=is_dir)
+    stage_root = root / dict(STAGES)[stage]
+    physical_parts = path.relative_to(stage_root).parts if path.is_relative_to(stage_root) else ()
+    phys_dir_parts = physical_parts if is_dir else physical_parts[:-1]
+    # 复用原地已有成员时，实体目录边界优先，避免外包名重复造成同目录双重登记。
+    proj_info = catalog.find_in_database(stage, phys_dir_parts)
+    if not proj_info and phys_dir_parts and '!' in source and not any(p.endswith('.解压') for p in phys_dir_parts):
+        proj_info = catalog.register_or_find(stage, '/'.join(phys_dir_parts), is_dir=True)
+    if not proj_info:
+        proj_info = catalog.register_or_find(stage, rel_stage_path, is_dir=is_dir)
 
     is_archive_node = path.suffix.lower() in ARCHIVES or source.endswith('!') or '!' in source
     if proj_info:
@@ -92,6 +100,8 @@ def folder_entry(path, source, root, catalog=None):
                     break
         reason = proj_info['reason']
         confidence = proj_info['confidence']
+        decision_source = proj_info.get('decision_source', 'rule')
+        boundary_review = bool(proj_info.get('boundary_review', False))
     else:
         ident = identifier(f'{stage}:ungrouped')
         name = '未识别大目录材料'
@@ -99,6 +109,8 @@ def folder_entry(path, source, root, catalog=None):
         folder = str(root / STAGES[[s[0] for s in STAGES].index(stage)][1])
         reason = '未识别到项目大目录，需人工复核'
         confidence = 'low'
+        decision_source = 'unresolved'
+        boundary_review = True
 
     return dict(
         path=str(path),
@@ -112,6 +124,8 @@ def folder_entry(path, source, root, catalog=None):
         small_dir=small_dir,
         reason=reason,
         confidence=confidence,
+        decision_source=decision_source,
+        boundary_review=boundary_review,
     )
 
 
@@ -148,9 +162,12 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             kind=entry['kind'],
             reason=entry.get('reason', ''),
             confidence=entry.get('confidence', 'medium'),
+            decision_source=entry.get('decision_source', 'rule'),
+            boundary_review=bool(entry.get('boundary_review', False)),
             files=0,
             paths=[]
         ))
+        folder['boundary_review'] = bool(folder.get('boundary_review')) or bool(entry.get('boundary_review'))
         folder['paths'] = sorted(set(folder['paths'] + entry['paths']))
         directories = [p for p in folder['paths'] if Path(p).is_dir()]
         if directories:
@@ -174,15 +191,15 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             def walk_error(value):
                 error(value.filename, value, summary)
 
-            for directory, dirs, names in os.walk(branch, onerror=walk_error, followlinks=False):
+            for directory, dirs, names in os.walk(disk_path(branch), onerror=walk_error, followlinks=False):
                 dirs.sort()
-                base = Path(directory)
+                base = branch / Path(directory).relative_to(disk_path(branch))
                 # 排除非业务目录或已有解压目录直接遍历
                 for child in dirs[:]:
                     path = base / child
                     if child in EXCLUDED_DIRECTORIES:
                         dirs.remove(child)
-                    elif path.is_symlink() or path.is_junction():
+                    elif disk_path(path).is_symlink() or disk_path(path).is_junction():
                         error(path, '跳过链接目录，无法保证材料完整', summary)
                         dirs.remove(child)
                     elif child.endswith('.解压'):
@@ -195,16 +212,14 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                     path = base / filename
                     if is_office_lock(path):
                         continue
-                    if path.is_symlink() or not path.resolve().is_relative_to(root):
+                    if disk_path(path).is_symlink() or not path.resolve().is_relative_to(root):
                         error(path, '文件链接超出安全扫描范围', summary)
                         continue
-                    entry = folder_entry(path, str(path), root, catalog)
                     if path.suffix.lower() in ARCHIVES:
-                        # 压缩包独立入队，就地解压并追踪
-                        entry = folder_entry(path, str(path) + '!', root, catalog)
-                        add_folder(entry)
+                        # 压缩包独立入队，先就地解压，待内部目录结构清晰后再判定边界
                         queue.append((path, summary, str(path), 0))
                     else:
+                        entry = folder_entry(path, str(path), root, catalog)
                         add_folder(entry)
                         entries.append(entry)
 
@@ -344,6 +359,15 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
         links = {}
 
         for fingerprint, stages_map in hashes.items():
+            # 同阶段多项目共用同一附件时，反向触发项目边界复核（不自动合并项目或宗地）
+            for sid, stage_entries in stages_map.items():
+                dir_ids = sorted({e['business_directory_id'] for e in stage_entries if e['kind'] != 'ungrouped'})
+                if len(dir_ids) > 1:
+                    for did in dir_ids:
+                        catalog.flag_boundary_review(did, f'M2发现同阶段({sid})多个项目目录共用相同附件，需复核项目边界')
+                        if did in folders:
+                            folders[did]['boundary_review'] = True
+
             # 获取拥有该哈希附件的所有阶段
             present = [sid for sid, _ in STAGES if stages_map[sid]]
             if len(present) < 2:
@@ -431,12 +455,44 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             reasons={reason: sum(s['skipped'].get(reason, 0) for s in summaries) for reason in {r for s in summaries for r in s['skipped']}},
             unreadable_archives=sum(e['category'] == 'unreadable_archive' for e in errors))
 
+        code_rows = defaultdict(list)
+        for row in result.get('project_code_index', []):
+            code_rows[row['directory_id']].append(row)
         for link in links.values():
-            if any(f.get('code_review') for f in (link['left'],link['right'])):
-                link['conflict'] = True
-                link['status'] = 'review'
+            if 'M1' in methods:
+                sides = [code_rows[f['id']] for f in (link['left'], link['right'])]
+                reliable = [{r['normalized_code'] for r in rows if r['valid'] and r['grade'] in ('A', 'B')
+                             and r['ownership_status'] == 'current_project'} for rows in sides]
+                uncertain = any(r['ownership_status'] != 'current_project' for rows in sides for r in rows)
+                conflict = bool(all(reliable) and reliable[0].isdisjoint(reliable[1]))
+                validation = ('conflict' if conflict else 'corroborated' if reliable[0] & reliable[1]
+                              else 'unresolved_ownership' if uncertain else 'missing_both' if not any(reliable)
+                              else 'missing_left' if not reliable[0] else 'missing_right')
+                link['m1_validation'] = dict(state=validation, left_codes=sorted(reliable[0]), right_codes=sorted(reliable[1]),
+                                             left_sources=sides[0], right_sources=sides[1])
+                link['conflict'] = conflict
+                if conflict or uncertain or any(r['needs_review'] for rows in sides for r in rows):
+                    link['status'] = 'review'
+                # 校验结论参与联合签名，原 M2 方法签名和附件证据不变。
+                link['signature'] = hashlib.sha256(json.dumps([link['method_signatures'], link['m1_validation']],
+                    ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                link['evidence_version'] = link['signature']
+            link['evidence_type'] = 'conflict' if link.get('conflict') else link['method']
             link['review_context'] = identifier(json.dumps([link['ambiguous'], link.get('conflict',False),
-                [[f['id'],f['folder'],f.get('reason')] for f in (link['left'],link['right'])]],ensure_ascii=False))
+                [[f['id'],f['folder'],f.get('reason'),Path(f['folder']).stat().st_ino if Path(f['folder']).exists() else 0,
+                  f.get('code_evidence_version'),f.get('boundary_review',False)] for f in (link['left'],link['right'])]],ensure_ascii=False))
+        for fid, f_obj in folders.items():
+            proj_in_cat = catalog.projects.get(fid)
+            if proj_in_cat:
+                if proj_in_cat.get('boundary_review'):
+                    f_obj['boundary_review'] = True
+                if proj_in_cat.get('boundary_review_reason'):
+                    f_obj['boundary_review_reason'] = proj_in_cat['boundary_review_reason']
+        for m_entry in materials:
+            f_obj = folders.get(m_entry['business_directory_id'])
+            if f_obj and f_obj.get('boundary_review'):
+                m_entry['boundary_review'] = True
+        catalog.save()
         result['links'] = sorted(links.values(), key=lambda e: (e['left']['stage'], e['left']['folder'], e['right']['stage'], e['right']['folder']))
         for path, version in [(e['path'], e['version']) for e in materials] + list(archive_versions.items()):
             try:
@@ -446,6 +502,11 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                 errors.append(preparation_issue(path, value, ''))
         if any(e['blocking'] for e in errors):
             raise PreparationError(result, updated)
+        catalog.db.execute('CREATE TABLE IF NOT EXISTS relation_snapshots (id TEXT, signature TEXT, payload TEXT, recorded_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (id, signature))')
+        for link in result['links']:
+            catalog.db.execute('INSERT OR IGNORE INTO relation_snapshots (id,signature,payload) VALUES (?,?,?)',
+                (link['id'], link['signature'], json.dumps(link, ensure_ascii=False, sort_keys=True)))
+        catalog.db.commit()
         report('完成', done=len(materials), total=len(materials))
         return result, updated
     finally:
@@ -476,38 +537,18 @@ def project_rows(result):
     for key, folder in folders.items():
         groups[find(key)].append(folder)
 
-    outgoing = defaultdict(set); incoming = set()
-    for link in links:
-        left = find(link['left']['id']); right = find(link['right']['id'])
-        if left != right and link.get('status') != 'rejected':
-            outgoing[left].add(right)
-            incoming.add(right)
-
     ordering = lambda key: min((f['stage'], f['name'], f['folder']) for f in groups[key])
-    roots = sorted((key for key in groups if key not in incoming), key=ordering)
-    covered = set(); rows = []
-
-    for root in roots + sorted(groups, key=ordering):
-        if root in covered:
-            continue
-        reached = set(); queue = [root]
-        while queue:
-            key = queue.pop()
-            if key in reached:
-                continue
-            reached.add(key)
-            queue.extend(outgoing[key])
-        covered.update(reached)
+    rows = []
+    for root in sorted(groups, key=ordering):
         stages = {sid: [] for sid, _ in STAGES}
-        for key in sorted(reached, key=ordering):
-            for folder in sorted(groups[key], key=lambda f: (f['stage'], f['name'], f['folder'])):
-                stages[folder['stage']].append(dict(folder, candidate=key != root))
+        for folder in sorted(groups[root], key=lambda f: (f['stage'], f['name'], f['folder'])):
+            stages[folder['stage']].append(dict(folder, candidate=False))
 
-        evidence = [link for link in links if find(link['left']['id']) in reached and find(link['right']['id']) in reached and link.get('status') != 'rejected']
-        rejected = [link for link in links if find(link['left']['id']) == root and link.get('status') == 'rejected']
+        evidence = [link for link in links if root in (find(link['left']['id']), find(link['right']['id'])) and link.get('status') != 'rejected']
+        rejected = [link for link in links if root in (find(link['left']['id']), find(link['right']['id'])) and link.get('status') == 'rejected']
         statuses = {link.get('status', 'pending') for link in evidence}
         status = 'review' if 'review' in statuses else 'pending' if 'pending' in statuses else 'confirmed' if evidence else 'rejected' if rejected else 'unlinked'
-        if not evidence and any(f.get('code_review') for key in reached for f in groups[key]):
+        if not evidence and any(f.get('code_review') for f in groups[root]):
             status = 'review'
         if result.get('inventory_only'):
             status = 'unscanned'
@@ -517,6 +558,7 @@ def project_rows(result):
             name=anchor['name'],
             stages=stages,
             status=status,
+            unlinked=not evidence,
             ambiguous=any(len(values) > 1 for values in stages.values()) or any(e.get('ambiguous') for e in evidence),
             links=[{k: v for k, v in link.items() if k not in ('evidence', 'method_evidence')} for link in evidence + rejected],
             evidence_count=sum(link['evidence_count'] for link in evidence)

@@ -11,6 +11,7 @@ import shutil
 
 from source_config import SOURCE, STAGES
 from extract_archives import disk_path
+from project_catalog import is_pure_classification, normalize_dir_name
 
 DOCUMENT_EXTENSIONS = {'.pdf', '.docx', '.doc', '.wps'}
 
@@ -19,7 +20,7 @@ def should_organize_container(dir_path):
     """精确判断目录是否属于需要进行'单文件建独立项目文件夹'的规划条件汇编层。"""
     # 必须在规划条件盖章版目录下，或者是明显的规划条件汇编目录
     parts = [p.name for p in dir_path.parents] + [dir_path.name]
-    if '规划条件盖章版' in parts:
+    if '规划条件盖章版' in parts and is_pure_classification(normalize_dir_name(dir_path.name)):
         return True
     return False
 
@@ -38,7 +39,9 @@ def organize_independent_documents(root=SOURCE, dry_run=False, verbose=True):
     if not stage_dir.is_dir():
         return dict(moved=0, folders=[])
 
-    for current_dir, dirs, files in stage_dir.walk():
+    for base, dirs, files in os.walk(disk_path(stage_dir)):
+        current_dir = stage_dir / Path(base).relative_to(disk_path(stage_dir))
+        dirs[:] = [d for d in dirs if not d.endswith('.解压') and not d.startswith('.')]
         if current_dir.name.endswith('.解压') or current_dir.name.startswith('.'):
             continue
 
@@ -69,7 +72,7 @@ def organize_independent_documents(root=SOURCE, dry_run=False, verbose=True):
                 print(f"[S2] 新建项目文件夹并归档: {file_path.name} -> {target_folder.name}/")
 
             if not dry_run:
-                target_folder.mkdir(parents=True, exist_ok=True)
+                disk_path(target_folder).mkdir(parents=True, exist_ok=True)
                 # 使用 disk_path 支持 Windows 长路径
                 src_dp = disk_path(file_path)
                 dst_dp = disk_path(target_file)

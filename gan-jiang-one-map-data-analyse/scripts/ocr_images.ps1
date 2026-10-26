@@ -1,4 +1,4 @@
-param([string]$Manifest = 'work/ocr_manifest.json')
+param([string]$Manifest = 'work/ocr_manifest.json', [switch]$Describe)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 [Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime] > $null
@@ -12,6 +12,10 @@ function Await($operation, $type) {
 }
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 if ($null -eq $engine) { throw 'Windows Chinese OCR unavailable' }
+if ($Describe) {
+    @{engine='Windows.Media.Ocr';version=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $env:WINDIR 'System32/Windows.Media.Ocr.dll')).FileVersion;os_version=[Environment]::OSVersion.Version.ToString();language=$engine.RecognizerLanguage.LanguageTag} | ConvertTo-Json -Compress
+    exit
+}
 $items = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
 $done = 0
 $failed = 0

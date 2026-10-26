@@ -253,9 +253,10 @@ class FolderMountTests(unittest.TestCase):
         self.put(3, '项目乙/a.pdf', b'shared')
         self.put(3, '项目丙/a.pdf', b'shared')
         result, _ = self.scan()
-        row = project_rows(result)[0]
-        self.assertTrue(row['ambiguous'])
-        self.assertEqual(len(row['stages']['S3']), 2)
+        rows = project_rows(result)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(rows[0]['ambiguous'])
+        self.assertTrue(all(sum(map(len, row['stages'].values())) == 1 for row in rows))
         self.assertTrue(all(e['status'] == 'pending' for e in result['links']))
 
     def test_format_directories_and_cached_pdf_are_not_projects(self):
@@ -382,6 +383,184 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(hit['project_name'], 'G105改建工程')
         cat2.close()
 
+    def test_agent_semantic_batch_collection_multi_projects_and_materials(self):
+        # 测试点 1, 2, 4, 5: 批次目录包含多个项目和多层材料目录、项目名不含“项目”二字、同一项目材料分布在不同子目录
+        self.put(3, '2024年第五批次/儒乐湖大道北延工程/报批材料/红线图/a.pdf', b'shared-road-1')
+        self.put(3, '2024年第五批次/儒乐湖大道北延工程/用地批复/b.pdf', b'shared-road-2')
+        self.put(3, '2024年第五批次/DXJJ2024001/报批材料/c.pdf', b'shared-parcel-1')
+        self.put(6, '2024-360199-48-01-099999/建设用地规划许可证申请表/a.pdf', b'shared-road-1')
+        self.put(6, '2024-360199-48-01-099999/项目四址范围（附图）、用地权属及拆迁情况/b.pdf', b'shared-road-2')
+        self.put(4, '出让/2024年度/DXJJ2024001/出让合同/c.pdf', b'shared-parcel-1')
+
+        storage = self.base / 'mount'
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        # Agent 先查看目录树结构并提交语义判断
+        tree = catalog.inspect_stage_tree('S3', max_depth=3)
+        self.assertEqual(tree[0]['children'][0]['name'], '2024年第五批次')
+        applied = catalog.apply_agent_decisions([
+            {
+                'stage_id': 'S3',
+                'rel_path': '2024年第五批次',
+                'node_type': 'collection',
+                'reason': '2024年第五批次为批次汇总目录，包含儒乐湖大道北延工程与DXJJ2024001两个独立项目',
+                'evidence_paths': ['2024年第五批次/儒乐湖大道北延工程', '2024年第五批次/DXJJ2024001'],
+                'children': [
+                    {
+                        'stage_id': 'S3',
+                        'rel_path': '2024年第五批次/儒乐湖大道北延工程',
+                        'node_type': 'project',
+                        'project_name': '儒乐湖大道北延工程',
+                        'reason': '不含“项目”二字的独立道路工程大目录',
+                        'evidence_paths': ['2024年第五批次/儒乐湖大道北延工程/报批材料/红线图/a.pdf'],
+                        'children': [
+                            {
+                                'stage_id': 'S3',
+                                'rel_path': '2024年第五批次/儒乐湖大道北延工程/报批材料',
+                                'node_type': 'material',
+                                'parent_project_root': '2024年第五批次/儒乐湖大道北延工程',
+                                'reason': '项目内部多层报批材料目录',
+                                'evidence_paths': ['2024年第五批次/儒乐湖大道北延工程/报批材料/红线图/a.pdf'],
+                            }
+                        ],
+                    },
+                    {
+                        'stage_id': 'S3',
+                        'rel_path': '2024年第五批次/DXJJ2024001',
+                        'node_type': 'project',
+                        'project_name': 'DXJJ2024001',
+                        'reason': '以宗地交易编号命名的独立项目目录',
+                        'evidence_paths': ['2024年第五批次/DXJJ2024001/报批材料/c.pdf'],
+                    },
+                ],
+            }
+        ])
+        self.assertEqual(len(applied), 4)
+        catalog.close()
+
+        result, _ = self.scan()
+        s3_names = {f['name'] for f in result['folders'] if f['stage'] == 'S3' and f['kind'] != 'ungrouped'}
+        self.assertEqual(s3_names, {'儒乐湖大道北延工程', 'DXJJ2024001'})
+        self.assertNotIn('2024年第五批次', s3_names)
+        # 验证同一项目材料分布在不同子目录时聚合到同一项目大目录关系，且包含2份证据
+        s3_s6 = [l for l in result['links'] if l['left']['stage'] == 'S3' and l['right']['stage'] == 'S6']
+        self.assertEqual(len(s3_s6), 1)
+        self.assertEqual(s3_s6[0]['left']['name'], '儒乐湖大道北延工程')
+        self.assertEqual(s3_s6[0]['evidence_count'], 2)
+
+    def test_archive_containing_multiple_projects_and_legacy_parent_lock_eviction(self):
+        # 测试点 3, 6: 压缩包内包含多个独立项目 + 旧数据库把父目录误存为项目时不锁死子项目发现
+        self.put(3, '一码管地报批相关材料汇总提供.zip', zip_bytes({
+            '01赣江新区2025年度第01批次集镇建设用地/1项目红线与权属/红线.pdf': b'zip-proj-1',
+            '02赣能南昌赣江新区60MW渔光互补光伏发电项目/4用地批复/批复.pdf': b'zip-proj-2',
+        }))
+        self.put(4, '出让/2018年度/02 赣国土资网交地【2018】XJ002号/DXJJ2018002/合同.pdf', b'parcel-2018-2')
+        self.put(4, '出让/2018年度/02 赣国土资网交地【2018】XJ002号/DXJJ2018003/合同.pdf', b'parcel-2018-3')
+        self.put(5, '土地首次登记附件/360122009006GB00002W00000000/合同.pdf', b'parcel-2018-2')
+        self.put(6, '2025-360199-44-01-012345/项目审批、核准备案文件/批复.pdf', b'zip-proj-2')
+
+        # 模拟旧数据库错误地把父级交地目录锁死为了单一项目
+        storage = self.base / 'mount'
+        cat = ProjectCatalog(storage_dir=storage, root=self.root)
+        wrong_parent = {
+            'id': 'legacy_wrong_parent',
+            'stage_id': 'S4',
+            'stage_name': STAGES[3][1],
+            'project_root': '出让/2018年度/02 赣国土资网交地【2018】XJ002号',
+            'project_name': '02 赣国土资网交地【2018】XJ002号',
+            'physical_path': str(self.root / STAGES[3][1] / '出让/2018年度/02 赣国土资网交地【2018】XJ002号'),
+            'depth': 3,
+            'reason': '旧规则误判父目录',
+            'confidence': 'high',
+            'status': 'confirmed',
+            'files': 2,
+            'updated_at': '2026-01-01T00:00:00',
+            'node_type': 'project',
+            'decision_source': 'rule',
+        }
+        cat.upsert_db(wrong_parent)
+        cat.db.commit()
+        cat.close()
+
+        result, _ = self.scan()
+        s3_projects = {f['name'] for f in result['folders'] if f['stage'] == 'S3' and f['kind'] != 'ungrouped'}
+        self.assertEqual(s3_projects, {
+            '01赣江新区2025年度第01批次集镇建设用地',
+            '02赣能南昌赣江新区60MW渔光互补光伏发电项目',
+        })
+        s4_projects = {f['name'] for f in result['folders'] if f['stage'] == 'S4' and f['kind'] != 'ungrouped'}
+        self.assertEqual(s4_projects, {'DXJJ2018002', 'DXJJ2018003'})
+        self.assertNotIn('02 赣国土资网交地【2018】XJ002号', s4_projects)
+
+    def test_agent_decision_rejects_nonexistent_paths_and_protects_manual_boundary(self):
+        # 测试点 7, 8, 13: Agent 引用不存在目录或证据被拒绝；人工确认受保护；边界变更触发关系复核且新边界生效
+        self.put(1, '外层汇编/真实子项目A/选址.pdf', b'shared-boundary-change')
+        self.put(2, '规划条件项目A/选址.pdf', b'shared-boundary-change')
+
+        storage = self.base / 'mount'
+        cat = ProjectCatalog(storage_dir=storage, root=self.root)
+        # 1. 引用不存在的目录 -> 拒绝
+        with self.assertRaises(ValueError):
+            cat.apply_agent_decisions([{
+                'stage_id': 'S1',
+                'rel_path': '根本不存在的虚拟项目',
+                'node_type': 'project',
+                'reason': '测试虚构目录',
+            }])
+        # 2. 引用不存在的证据文件 -> 拒绝
+        with self.assertRaises(ValueError):
+            cat.apply_agent_decisions([{
+                'stage_id': 'S1',
+                'rel_path': '外层汇编/真实子项目A',
+                'node_type': 'project',
+                'reason': '测试虚构证据路径',
+                'evidence_paths': ['外层汇编/真实子项目A/不存在的批复.pdf'],
+            }])
+        # 3. 缺少判断依据 reason -> 拒绝
+        with self.assertRaises(ValueError):
+            cat.apply_agent_decisions([{
+                'stage_id': 'S1',
+                'rel_path': '外层汇编/真实子项目A',
+                'node_type': 'project',
+                'reason': '   ',
+            }])
+
+        # 4. 保护 status == 'manual' 的人工确认边界
+        p_s2 = cat.register_or_find('S2', '规划条件项目A/选址.pdf', is_dir=False)
+        cat.update_project_boundary(p_s2['id'], '规划条件项目A', '人工锁定规划项目A')
+        res = cat.apply_agent_decisions([{
+            'stage_id': 'S2',
+            'rel_path': '规划条件项目A',
+            'node_type': 'unresolved',
+            'reason': '尝试覆盖人工确认边界',
+        }])
+        self.assertEqual(res[0].get('skipped'), 'manual_protected')
+        self.assertEqual(cat.projects[p_s2['id']]['status'], 'manual')
+        self.assertEqual(cat.projects[p_s2['id']]['project_name'], '人工锁定规划项目A')
+
+        # 5. Agent 将 S1 外层目录判定为 collection、子目录判定为 project 后，M2 证据挂接到新子项目边界
+        cat.apply_agent_decisions([
+            {
+                'stage_id': 'S1',
+                'rel_path': '外层汇编',
+                'node_type': 'collection',
+                'reason': '外层汇编容器',
+                'evidence_paths': ['外层汇编/真实子项目A'],
+                'children': [{
+                    'stage_id': 'S1',
+                    'rel_path': '外层汇编/真实子项目A',
+                    'node_type': 'project',
+                    'project_name': '真实子项目A',
+                    'reason': '真实子项目边界',
+                    'evidence_paths': ['外层汇编/真实子项目A/选址.pdf'],
+                }],
+            }
+        ])
+        cat.close()
+
+        scan_res, _ = self.scan()
+        self.assertEqual(len(scan_res['links']), 1)
+        self.assertEqual(scan_res['links'][0]['left']['name'], '真实子项目A')
+        self.assertEqual(scan_res['links'][0]['right']['name'], '人工锁定规划项目A')
 
 
 if __name__ == '__main__':

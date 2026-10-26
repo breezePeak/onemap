@@ -61,13 +61,12 @@ try {
     Write-Host 'Deletes collected data, task uploads, review decisions, caches and exports.'
     Write-Host 'Preserves source materials, test_result.xlsx, code and Python/CAD dependencies.'
     foreach ($target in $targets) { Write-Host "DELETE $target" }
-    Write-Host "RESET  $reviews -> []"
+    Write-Host "KEEP   $reviews (manual evidence)"
     if ($Preview) { Write-Host 'Preview only. No files or services changed.'; exit 0 }
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot 'stop-tool.ps1') -Port $Port
     if ($LASTEXITCODE -ne 0) { throw 'Workbench could not be stopped; no data was deleted.' }
     foreach ($target in $targets) { Remove-GeneratedItem $target }
-    [IO.File]::WriteAllText($reviews, "[]`r`n", (New-Object Text.UTF8Encoding($false)))
     Write-Host 'Cleanup complete. Restart the workbench to run a fresh test.' -ForegroundColor Green
     exit 0
 } catch {

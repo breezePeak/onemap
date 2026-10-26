@@ -1,4 +1,5 @@
 """原始数据树内增量解压，SQLite 记录成员校验与实际路径。"""
+from contextlib import ExitStack, nullcontext
 import json
 import os
 from pathlib import Path
@@ -114,9 +115,9 @@ class ArchiveRecords:
         self.db.execute('INSERT OR REPLACE INTO archive_versions VALUES (?,?)',(key,current_version))
         self.db.commit(); return members
 
-    def stream_member(self, archive, member, target):
+    def stream_member(self, archive, member, target, archive_stream=None):
         if Path(archive).suffix.lower()=='.zip':
-            with zipfile.ZipFile(disk_path(archive)) as z, z.open(member['raw']) as source, disk_path(target).open('wb') as out:
+            with (nullcontext(archive_stream) if archive_stream is not None else zipfile.ZipFile(disk_path(archive))) as z, z.open(member['raw']) as source, disk_path(target).open('wb') as out:
                 shutil.copyfileobj(source,out)
         else:
             with disk_path(target).open('wb') as out:
@@ -170,39 +171,43 @@ class ArchiveRecords:
         counts=dict(extracted=0,reused=0,failed=0); nested=[]; self.errors=[]
         members=self.members(archive); version=file_version(archive)
         total=sum(not m['directory'] for m in members)
-        for member in members:
-            target=None
-            try:
-                if member['directory'] and member['name'] in ('/','./','.'):
-                    self.db.execute("DELETE FROM files WHERE archive=? AND raw=? AND status='failed'",(str(archive),member['raw']))
-                    continue
-                target=self.checked_path(safe_target(folder,member['name']))
-                if member['directory']: continue
-                progress('检查已解压',str(archive),member['name'],dict(counts),total)
-                existing=self.existing(archive,member)
-                if existing:
-                    target=existing; counts['reused']+=1
-                else:
-                    progress('解压缺失成员',str(archive),member['name'],dict(counts),total)
-                    if shutil.disk_usage(archive.parent).free < member['size']+1024*1024: raise OSError('磁盘空间不足')
-                    disk_path(target.parent).mkdir(parents=True,exist_ok=True)
-                    # 仅替换曾由本索引写入的专用解压文件，避免覆盖用户材料。
-                    owned=self.db.execute('SELECT 1 FROM owned_files WHERE archive=? AND raw=? AND dest=?',(str(archive),member['raw'],str(target))).fetchone()
-                    if disk_path(target).exists() and not owned: raise ValueError('专用路径已有未验证材料，保留原文件，请人工核对')
-                    self.db.execute('INSERT OR REPLACE INTO owned_files VALUES (?,?,?)',(str(target),str(archive),member['raw']))
+        with ExitStack() as streams:
+            archive_stream = None
+            for member in members:
+                target=None
+                try:
+                    if member['directory'] and member['name'] in ('/','./','.'):
+                        self.db.execute("DELETE FROM files WHERE archive=? AND raw=? AND status='failed'",(str(archive),member['raw']))
+                        continue
+                    target=self.checked_path(safe_target(folder,member['name']))
+                    if member['directory']: continue
+                    progress('检查已解压',str(archive),member['name'],dict(counts),total)
+                    existing=self.existing(archive,member)
+                    if existing:
+                        target=existing; counts['reused']+=1
+                    else:
+                        progress('解压缺失成员',str(archive),member['name'],dict(counts),total)
+                        if shutil.disk_usage(archive.parent).free < member['size']+1024*1024: raise OSError('磁盘空间不足')
+                        disk_path(target.parent).mkdir(parents=True,exist_ok=True)
+                        # 仅替换曾由本索引写入的专用解压文件，避免覆盖用户材料。
+                        owned=self.db.execute('SELECT 1 FROM owned_files WHERE archive=? AND raw=? AND dest=?',(str(archive),member['raw'],str(target))).fetchone()
+                        if disk_path(target).exists() and not owned: raise ValueError('专用路径已有未验证材料，保留原文件，请人工核对')
+                        self.db.execute('INSERT OR REPLACE INTO owned_files VALUES (?,?,?)',(str(target),str(archive),member['raw']))
+                        self.db.commit()
+                        fd,tempname=tempfile.mkstemp(prefix='.onemap-',dir=disk_path(target.parent)); os.close(fd); temp=Path(tempname)
+                        try:
+                            if archive.suffix.lower()=='.zip' and archive_stream is None:
+                                archive_stream = streams.enter_context(zipfile.ZipFile(disk_path(archive)))
+                            sha=self.stream_member(archive,member,temp,archive_stream)
+                            if file_version(archive)!=version: raise OSError('解压时压缩包发生变化')
+                            progress('校验',str(archive),member['name'],dict(counts),total)
+                            temp.replace(disk_path(target)); self.record(archive,member,target,sha); counts['extracted']+=1
+                        finally: temp.unlink(missing_ok=True)
+                    if target.suffix.lower() in ('.zip','.rar','.7z'): nested.append(target)
+                except (OSError,ValueError,RuntimeError,zipfile.BadZipFile,NotImplementedError,subprocess.SubprocessError) as error:
+                    counts['failed']+=1; self.errors.append(dict(path=str(archive)+'!'+member['name'],error=str(error)))
+                    self.db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?)',(str(archive),member['raw'],member.get('crc'),member['size'],str(target) if target else '',0,0,'failed',str(error)))
                     self.db.commit()
-                    fd,tempname=tempfile.mkstemp(prefix='.onemap-',dir=disk_path(target.parent)); os.close(fd); temp=Path(tempname)
-                    try:
-                        sha=self.stream_member(archive,member,temp)
-                        if file_version(archive)!=version: raise OSError('解压时压缩包发生变化')
-                        progress('校验',str(archive),member['name'],dict(counts),total)
-                        temp.replace(disk_path(target)); self.record(archive,member,target,sha); counts['extracted']+=1
-                    finally: temp.unlink(missing_ok=True)
-                if target.suffix.lower() in ('.zip','.rar','.7z'): nested.append(target)
-            except (OSError,ValueError,RuntimeError,zipfile.BadZipFile,NotImplementedError,subprocess.SubprocessError) as error:
-                counts['failed']+=1; self.errors.append(dict(path=str(archive)+'!'+member['name'],error=str(error)))
-                self.db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?)',(str(archive),member['raw'],member.get('crc'),member['size'],str(target) if target else '',0,0,'failed',str(error)))
-                self.db.commit()
         if file_version(archive)!=version: raise OSError('处理时压缩包发生变化')
         self.db.commit()
         return counts,nested

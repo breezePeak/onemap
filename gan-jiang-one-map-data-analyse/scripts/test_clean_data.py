@@ -57,7 +57,7 @@ class CleanDataTests(unittest.TestCase):
         for folder in ('outputs', '解压材料'):
             self.assertEqual(list((self.project / folder).iterdir()), [])
         self.assertFalse((self.project / 'cache_reuse.json').exists())
-        self.assertEqual((self.project / 'reviewed_fields.json').read_text().strip(), '[]')
+        self.assertEqual((self.project / 'reviewed_fields.json').read_text().strip(), '[{"old":"review"}]')
         self.assertEqual((self.project / 'test_result.xlsx').read_text(), 'original input')
         self.assertEqual((self.outside / 'original.pdf').read_text(), 'source material')
         self.assertTrue((self.project / 'work/python_packages/keep.txt').is_file())

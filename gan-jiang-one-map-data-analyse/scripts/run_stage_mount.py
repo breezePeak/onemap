@@ -24,11 +24,7 @@ def run_pipeline(source=SOURCE, methods=None, verbose=True):
     if not validation['is_valid']:
         raise FileNotFoundError(f"数据源验证失败，缺少子目录: {validation['missing']}")
 
-    # 预处理：对汇编分类层下非同一项目的独立散落文书，自动按文件名新建独立项目大目录
-    if verbose:
-        print("\n=== 执行独立业务项目文书自动归档规整 ===")
-    organize_independent_documents(root=source, verbose=verbose)
-
+    # 严格保护原始资料：不自动移动、拆分或重新组织原始文件
     db_path = BASE / '解压材料/解压记录.sqlite'
     mount_dir = BASE / 'work/folder_mount'
     mount_dir.mkdir(parents=True, exist_ok=True)

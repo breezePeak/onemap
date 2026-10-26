@@ -8,9 +8,20 @@ import { createHash } from 'node:crypto';
 import { createCanvas } from '@napi-rs/canvas';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
-const documents=JSON.parse(await fs.readFile('work/pdf_documents.json','utf8'));
 const require=createRequire(import.meta.url);
 const pdfRoot=path.dirname(require.resolve('pdfjs-dist/package.json'));
+// M1 uses this same renderer for one bounded page, without running the full manifest.
+if(process.argv[2]==='--page'){
+  const [source,number,destination]=process.argv.slice(3);
+  const pdf=await getDocument({data:new Uint8Array(await fs.readFile(source)),useSystemFonts:true,wasmUrl:path.join(pdfRoot,'wasm').replaceAll('\\','/')+'/',standardFontDataUrl:path.join(pdfRoot,'standard_fonts').replaceAll('\\','/')+'/',verbosity:0}).promise;
+  const page=await pdf.getPage(Number(number)),size=page.getViewport({scale:1});
+  const viewport=page.getViewport({scale:Math.min(2.5,2500/Math.max(size.width,size.height))});
+  const canvas=createCanvas(Math.ceil(viewport.width),Math.ceil(viewport.height));
+  await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+  await fs.writeFile(destination,canvas.toBuffer('image/png'));await pdf.destroy();
+  process.exit(0);
+}
+const documents=JSON.parse(await fs.readFile('work/pdf_documents.json','utf8'));
 const force=process.argv.includes('--force');
 const workerIndex=process.argv.indexOf('--document');
 const fragmentPath=i=>`work/render_manifests/${createHash('sha256').update(documents[i].source).digest('hex').slice(0,24)}.json`;

@@ -137,7 +137,7 @@ class ProjectCodeTests(unittest.TestCase):
         self.put(1,'甲/table.docx',zip_bytes({'word/document.xml':xml}))
         from openpyxl import Workbook
         book=Workbook(); sheet=book.active
-        sheet.append(['项目代码','项目名称']); sheet.append([CODE,'甲'])
+        sheet.append(['项目代码','项目名称']); sheet.append([CODE,'乙'])
         path=self.put(7,'乙/table.xlsx',b''); book.save(path); book.close()
         result,_=self.scan()
         self.assertEqual(len(result['links']),1)
@@ -149,11 +149,11 @@ class ProjectCodeTests(unittest.TestCase):
         self.put(7, f'宗地一/{CODE}.txt', '一')
         self.put(7, f'宗地二/{CODE}.txt', '二')
         result, _ = self.scan()
-        self.assertEqual(len(result['links']), 2)
-        self.assertTrue(all(e['ambiguous'] and e['conflict'] and e['status']=='review' for e in result['links']))
+        self.assertEqual(result['links'], [])
+        self.assertTrue(all(e['ownership_status']=='unresolved_ownership' for e in result['project_code_index'] if e['stage']=='S1'))
         self.assertEqual(result['m1_statistics']['conflicts'], 1)
         self.assertTrue(all(e['conflict'] for e in result['project_code_index'] if e['stage']=='S1'))
-        self.assertEqual(len(project_rows(result)[0]['stages']['S7']), 2)
+        self.assertEqual(len(project_rows(result)), 3)
 
     def test_one_to_many_without_conflict_remains_separate_pending_candidates(self):
         for stage, name in ((1,'甲'),(7,'宗地一'),(7,'宗地二')):
@@ -192,7 +192,7 @@ class ProjectCodeTests(unittest.TestCase):
         self.assertEqual(reviewed['status'], 'review')
         self.assertEqual(reviewed['method_statuses']['M2'], 'confirmed')
         self.assertEqual(reviewed['confirmation'], decisions[old['id']])
-        self.assertEqual(view['count'], 1)
+        self.assertEqual(view['count'], 2)
         self.assertNotIn('method_evidence', view['rows'][0]['links'][0])
         for method in ('M1','M2'):
             handler=server.Handler.__new__(server.Handler)
@@ -271,9 +271,9 @@ class ProjectCodeTests(unittest.TestCase):
             self.put(7, f'{code}/a.txt', 'b')
         result, _ = self.scan()
         view, _ = self.view(result, params={'view':['projects'],'method':['M1'],'pair':['S1-S7'],'page':['2'],'status':['pending']})
-        self.assertEqual((view['count'],view['pages'],len(view['rows'])), (51,2,1))
+        self.assertEqual((view['count'],view['pages'],len(view['rows'])), (102,3,50))
         view, _ = self.view(result, params={'view':['projects'],'method':['M2']})
-        self.assertEqual(view['count'], 0)
+        self.assertEqual(view['count'], 102)
         html = (BASE/'app/static/index.html').read_text(encoding='utf-8')
         self.assertEqual(len(set(re.findall(r'value="(S\d-S\d)"', html))), 21)
         self.assertRegex(html, r'value="M1">')

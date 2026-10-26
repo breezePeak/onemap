@@ -28,6 +28,12 @@ def canonical_code(value):
     return re.sub(r'[一—–－−]', '-', compact_text(value))
 
 
+def valid_project_code(value):
+    code = canonical_code(value)
+    return bool(code.isascii() and re.fullmatch(PATTERNS['project_code'], code)
+                and 1900 <= int(code[:4]) <= 2099 and code.split('-')[1] != '000000')
+
+
 def page_evidence(text,targets):
     compact=compact_text(text)
     original=unicodedata.normalize('NFKC',text).upper()

@@ -24,7 +24,8 @@ try{
     if(url.pathname.startsWith('/api/')){
       requests.push({path:url.pathname,query:url.search,body:request.postDataJSON()});
       let data=[];
-      if(url.pathname==='/api/folder-mount')data={status:'ready',phase:'完成',source_root:'F:/sample',stage_config:stages,stages:[],rows:[project],summary:{projects:51,project_pending:51},page:Number(url.searchParams.get('page')||1),pages:2,count:51,chains:[],projects:[],errors:[]};
+      if(url.pathname==='/api/folder-mount')data={status:'ready',phase:'完成',source_root:'F:/sample',stage_config:stages,stages:[],rows:[project],summary:{projects:51,project_pending:51},m1_statistics:{projects_with_codes:2,distinct_codes:1,cross_stage_candidates:1,ambiguous:0,conflicts:1,unrecognized_projects:1},page:Number(url.searchParams.get('page')||1),pages:2,count:51,chains:[],projects:[],errors:[]};
+      if(url.pathname==='/api/folder-mount/code-evidence')data={evidence:[{...source,source_type:'ocr',grade:'C',needs_review:true,ownership_status:'unresolved_ownership',conflict:true,physical_path:'F:/sample/S1/汇编.pdf',ocr_engine:{engine:'fixture',version:'1'},semantic:{status:'review',conclusion:{ownership:'uncertain'}}}],page:1,pages:1,count:1};
       if(url.pathname==='/api/folder-mount/links/link'){
         const items=evidence.filter(e=>!url.searchParams.get('method')||url.searchParams.get('method')==='all'||(e.method||'M2')===url.searchParams.get('method'));
         data={evidence:items,page:1,pages:1,count:items.length};
@@ -82,6 +83,17 @@ try{
   assert.equal(requests.find(r=>r.path.endsWith('/decision')).body.status,'confirmed');
   await mkdir(path.join(base,'work/m1-ui'),{recursive:true});
   await page.screenshot({path:path.join(base,'work/m1-ui/review.png'),fullPage:true});
+  await page.locator('#closeMountReview').click();
+  await page.getByRole('button',{name:'查看全部 M1 代码证据 / 归属复核'}).click();
+  await page.locator('.mount-code-source').waitFor();
+  assert.match(await page.locator('#mountReviewLeft').innerText(),/无法确定归属/);
+  assert.match(await page.locator('#mountReviewLeft').innerText(),/OCR 引擎/);
+  assert.match(await page.locator('#mountReviewLeft').innerText(),/模型研判/);
+  const codeFiltered=page.waitForResponse(response=>response.url().includes('code-evidence?status=unresolved_ownership'));
+  await page.getByRole('combobox',{name:'代码证据状态'}).selectOption('unresolved_ownership');
+  await codeFiltered;
+  await page.getByRole('button',{name:'查看来源',exact:true}).click();
+  assert.match(await page.locator('.mount-preview-frame').getAttribute('src'),/#page=2$/);
   await page.locator('#closeMountReview').click();
   await page.locator('#mountMethodFilter').selectOption('M1');
   const filtered=page.waitForResponse(response=>response.url().includes('pair=S1-S7'));

@@ -18,6 +18,31 @@ function mountPathNode(path,action='folder',prefix='📂 '){
   return label;
 }
 
+function mountCodeSource(source){
+  const block=node('div',undefined,'mount-code-source');
+  const type={body_field:'正文',structured_field:'结构化字段',filename:'文件名',project_directory:'项目目录',subdirectory:'子目录',ocr:'OCR'}[source.source_type]||source.source_type;
+  block.append(node('p',`${source.normalized_code} ｜ 原始：${source.raw_code} ｜ ${source.stage} ｜ ${source.project_name} ｜ ${type} ｜ ${source.location} ｜ ${source.grade||''}级 ｜ ${source.ownership_status==='unresolved_ownership'?'无法确定归属':source.ownership_status||''} ｜ ${source.conflict?'多代码冲突':source.needs_review?'需复核':'候选证据'}`));
+  block.append(mountPathNode(source.physical_path||source.source_path,source.source_type.includes('directory')?'folder':'select','来源：'),node('p',source.text_evidence));
+  if(source.ocr_engine)block.append(node('p','OCR 引擎：'+JSON.stringify(source.ocr_engine)));
+  if(source.semantic)block.append(node('p','模型研判（需复核）：'+JSON.stringify(source.semantic)));
+  const preview=node('button','查看来源','secondary');
+  preview.onclick=()=>{if(source.source_type.includes('directory'))openWindowsPath(source.physical_path||source.source_path,'folder');else renderMountPreview({physical_path:source.physical_path||source.source_path,stageLabel:source.stage,page:/^page=(\d+)$/.exec(source.location)?.[1]});};
+  block.append(preview);return block;
+}
+
+function openCodeEvidence(){
+  activeReviewProjectId=null;activeReviewFolderIds=[];activePreviewPath=null;
+  $('mountReviewTitle').textContent='M1 项目代码证据与归属复核';
+  $('mountReviewSubtitle').textContent='孤立代码及归属未明的记录不会生成可信目录关系；同码可能涉及不同宗地。';
+  const left=$('mountReviewLeft'),filter=node('select'),list=node('div'),bar=node('div'),prev=node('button','上一页','secondary'),next=node('button','下一页','secondary'),label=node('span');
+  filter.setAttribute('aria-label','代码证据状态');
+  for(const [value,text] of [['all','全部代码证据'],['review','需复核'],['unresolved_ownership','无法确定归属'],['current_project','当前目录候选']]){const option=node('option',text);option.value=value;filter.append(option);}
+  let page=1,request=0;
+  const load=async()=>{const current=++request;try{const data=await api('/api/folder-mount/code-evidence?'+new URLSearchParams({status:filter.value,page:String(page)}));if(current!==request)return;list.replaceChildren(...data.evidence.map(mountCodeSource));label.textContent=`第 ${data.page}/${data.pages} 页 · ${data.count} 条`;prev.disabled=data.page<=1;next.disabled=data.page>=data.pages;}catch(error){list.replaceChildren(node('p',error.message));}};
+  filter.onchange=()=>{page=1;load();};prev.onclick=()=>{page--;load();};next.onclick=()=>{page++;load();};
+  bar.append(prev,label,next);left.replaceChildren(filter,list,bar);renderMountPreview(null);$('mountReviewDialog').showModal();load();
+}
+
 function mountProjectCell(folders){
   const cell=node('td');
   if(!folders.length){cell.append(node('span',mountData?.inventory_only?'待匹配':'—','mount-missing'));return cell;}
@@ -135,13 +160,7 @@ function mountEvidence(link,autoPreviewFirst=false){
           block.append(node('strong',`M1 · ${item.normalized_code}`),node('p',item.explanation));
           for(const side of ['left','right']){
             for(const source of item[side+'_sources']||[]){
-              const sourceLabel={body_field:'正文字段',structured_field:'结构化字段',filename:'文件名',project_directory:'项目目录',subdirectory:'子目录'}[source.source_type]||source.source_type;
-              block.append(node('p',`${source.normalized_code} ｜ ${source.raw_code} ｜ ${source.stage} ｜ ${source.project_name} ｜ ${sourceLabel} ｜ ${source.location} ｜ ${source.conflict?'证据冲突':mountLabels[link.status]}`));
-              block.append(mountPathNode(source.source_path,source.source_type.includes('directory')?'folder':'select','来源：'));
-              block.append(node('p',source.text_evidence));
-              const preview=node('button','查看来源','secondary');
-              preview.onclick=()=>{if(source.source_type.includes('directory'))openWindowsPath(source.source_path,'folder');else renderMountPreview({physical_path:source.source_path,stageLabel:source.stage,page:/^page=(\d+)$/.exec(source.location)?.[1]});};
-              block.append(preview);
+              block.append(mountCodeSource(source));
             }
           }
           records.append(block);
@@ -258,6 +277,11 @@ function mountRelation(link,blocked,autoPreviewFirst=false){
   title.append(sLeft,nameLeft,arrow,sRight,nameRight);
   const badge=node('span',mountLabels[link.status],`mount-status-badge status-${link.status}`);
   titleArea.append(title,badge,node('small',(link.methods||['M2']).join(' + ')+' · '+(link.ambiguous?'多目录候选':'目录候选')));
+  if(link.m1_validation){
+    const v=link.m1_validation,labels={corroborated:'双方代码相同，M1 佐证',conflict:'双方可靠项目代码冲突，需人工复核',unresolved_ownership:'代码归属不明，保留原附件候选',missing_both:'双方均缺少可靠 M1 代码证据',missing_left:'源目录缺少可靠 M1 代码证据',missing_right:'目标目录缺少可靠 M1 代码证据'};
+    titleArea.append(node('p',`${labels[v.state]||v.state} · ${v.left_codes.join('、')||'未识别'} ↔ ${v.right_codes.join('、')||'未识别'}`,link.conflict?'mount-warning':''));
+  }
+  if(link.ambiguous&&(link.methods||[]).includes('M1'))titleArea.append(node('p','同码多目录：可能涉及不同宗地；逐条确认目录关系，不代表宗地合并。','mount-warning'));
   if(link.confirmation?.status&&link.status==='review')titleArea.append(node('small',`原人工决定：${mountLabels[link.confirmation.status]}；证据变化需复核`));
 
   const actionRow=node('div',undefined,'mount-relation-header-actions');
@@ -389,13 +413,14 @@ function renderMount(){
   $('mountPrev').disabled=mountPage<=1;$('mountNext').disabled=mountPage>=data.pages;
   const s=data.summary;$('mountSummary').textContent=`${s.projects??0} 个项目${data.inventory_only?'目录':''} · 待匹配 ${s.project_unscanned??0} · 已确认 ${s.project_confirmed??0} · 候选 ${s.project_pending??0} · 需复核 ${s.project_review??0} · 未找到对应 ${s.project_unlinked??0}`;
   if(data.m1_statistics){const m=data.m1_statistics;$('mountSummary').textContent+=` · M1 有代码 ${m.projects_with_codes} / 不同代码 ${m.distinct_codes} / 候选 ${m.cross_stage_candidates} / 歧义 ${m.ambiguous} / 冲突 ${m.conflicts} / 未识别 ${m.unrecognized_projects}`;}
+  if(data.m1_statistics){const button=node('button','查看全部 M1 代码证据 / 归属复核','secondary');button.onclick=openCodeEvidence;$('mountSummary').append(button);}
   if(data.skip_statistics)$('mountSummary').title=JSON.stringify(data.skip_statistics);
   if(data.inventory_only)$('mountPhase').textContent=(running?'正在检查材料':'材料检查有异常')+' · 当前显示真实项目目录，尚未生成对应关系';
   $('mountErrors').classList.toggle('hidden',!data.errors.length);
   const errBox=$('mountErrorText');
   errBox.replaceChildren();
   for(const item of data.errors){
-    const line=mountPathNode(item.path,'select',`⚠ ${item.error} · `);
+    const line=mountPathNode(item.physical_path||item.path,'select',`⚠ ${item.error}${item.page?' · page='+item.page:''}${item.remaining?' · 尚余 '+item.remaining+' 页':''} · `);
     errBox.append(line);
   }
   // 动态渲染全部七个阶段表头与单元格

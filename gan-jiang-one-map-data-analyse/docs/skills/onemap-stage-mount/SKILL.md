@@ -1,78 +1,216 @@
 ---
 name: onemap-stage-mount
-description: 执行赣江一张图七阶段目录扫描、压缩包原地增量解压、规则判定项目大目录及 M1 项目代码、M2 相同附件独立或联合目录候选关联。
+description: 执行赣江一张图七阶段目录扫描、压缩包原地增量解压、Agent 业务语义智能研判项目大目录并存库、以及 M2 相同附件匹配与 M1 完整项目代码补漏及交叉校验的全流程技能。
 ---
 
-# 赣江一张图 · 七阶段 M1 / M2 目录关联技能 (onemap-stage-mount)
+# 赣江一张图 · 七阶段项目大目录智能识别 + M1 / M2 联合关联技能 (onemap-stage-mount)
 
-## 技能定位
-本技能固化并自动化执行“OneMap 第一阶段”核心前 4 项任务：
-1. **七阶段业务目录扫描**：严格纳入 S1~S7 真实业务阶段，排除非业务阶段（数据图层、收储材料、计划供应）；
-2. **汇编层散落独立文书规整**：自动识别规划条件盖章版等汇编目录下非同一项目的独立散落文书，就地新建与文件名同名的项目文件夹并将文件归档，确保独立业务项目均拥有专属项目大目录；
-3. **原地增量解压与校验**：压缩包在原目录下以 `<文件名>.解压/` 隔离解压并校验，复用未损坏成员，不污染工作区；
-4. **规则判定业务项目大目录并持久化存库**：依据阶段业务形态判断项目根节点层级，存库至 `work/folder_mount/project_catalog.json` 和 SQLite；当前执行过程不调用大模型；
-5. **M2 相同附件精确关联挂接至项目大目录**：支持任意两个不同阶段跨阶段比较（21组），关系归属项目大目录，证据展示命中小目录。
-6. **M1 项目代码候选关联**：复用统一代码正则，从项目目录、子目录、文件名、明确正文标签及结构化字段取证；完整代码相等才命中，保留冲突和一对多目录，不自动合并宗地。M1 与 M2 同一目录对合并展示并分别保留证据及签名。
+## 一、技能定位与架构分工
 
-## 数据源与阶段定义
-默认数据根目录：`F:\项目数据\赣江一张图`（可通过环境变量 `ONEMAP_SOURCE` 自定义）。
+本技能是供执行任务的 **Agent 自身**完成“OneMap 第一阶段（项目大目录智能识别 + M2 相同附件关联 + M1 完整项目代码补漏与校验）”的完整业务技能，**不依赖也不调用任何外部独立大模型服务或 API**。
 
-| 阶段代码 | 阶段目录名 | 业务含义 |
-|---|---|---|
-| S1 | `1.用地预审与选址` | 用地预审与选址 |
-| S2 | `2.条件出具` | 规划条件和用地红线出具 |
-| S3 | `3.批次报批阶段` | 用地报批 |
-| S4 | `4.土地供应阶段` | 土地供应 |
-| S5 | `5.土地首次登记` | 土地首次登记 |
-| S6 | `6.用地规划` | 用地规划 |
-| S7 | `7.工程规划` | 工程规划 |
+核心协同范式：
+**程序扫描并提供证据 → Agent 理解目录结构 → Agent 判断项目边界 → 程序校验及存库 → M2 相同附件匹配 → M1 代码补漏与交叉校验 → 统一关联结果与人工复核。**
 
-## 触发与执行方式
+### 1. Agent 职责（业务语义推理与决策）
+- 理解七阶段目录树及完整的上下级父子关系。
+- 区分独立项目目录（`project`）、多项目汇总/批次目录（`collection`）、年份/业务类别分类目录（`classification`）、项目内部材料目录（`material`）以及证据不足目录（`unresolved`）。
+- 发现同一批次、同一交地文号或同一压缩包下的多个独立项目/宗地，不将整批材料归为一个项目，也不合并多个宗地。
+- 在目录存在歧义时，自主决定按需调用工具读取代表性文件摘要；无足够证据时绝不猜测，标记为 `unresolved` 或提交人工复核。
+- 分析 M1/M2 反向触发的同目录多代码冲突、同阶段多项目共用附件等边界疑点。
 
-### 方式 1：Python 脚本一键执行
-在项目根目录下运行：
+### 2. 程序职责（扫描、取证、校验与持久化）
+- 扫描七阶段文件系统，执行压缩包原地增量解压（`<压缩包>.解压/`）与完整性校验，**严禁自动移动、删除或重组原始文件**。
+- 提取目录树、父子层级、文件数量/类型、代表性文件名、材料内容摘要及项目代码线索。
+- 严格校验 Agent 输出的目录路径与证据路径是否真实存在于磁盘，拒绝任何虚构路径或无依据判断。
+- 维护 SQLite（`work/folder_mount/project_catalog.sqlite`）与 JSON（`work/folder_mount/project_catalog.json`）项目目录库，生成稳定目录 ID，记录 `structure_version` 与 `boundary_history`，无条件保护人工确认边界（`status == 'manual'`）。
+- 计算有效材料完整 SHA-256（M2），提取并标准化完整项目代码（M1），执行跨阶段精确匹配与交叉校验。
+
+---
+
+## 二、数据源与七阶段定义
+
+默认数据根目录：`F:\项目数据\赣江一张图`（可通过 `--source` 或环境变量 `ONEMAP_SOURCE` 指定）。
+仅扫描以下 S1~S7 真实业务阶段，自动忽略非业务目录（`数据图层`、`收储材料`、`计划供应`）：
+
+| 阶段代码 | 阶段目录名 | 业务含义 | 常见目录形态 |
+|---|---|---|---|
+| S1 | `1.用地预审与选址` | 用地预审与选址 | 独立工程项目目录，或解压包内的多项目选址论证汇总 |
+| S2 | `2.条件出具` | 规划条件和用地红线出具 | 直接项目目录，或 `规划条件盖章版/<年份>/` 下的地块项目 |
+| S3 | `3.批次报批阶段` | 用地报批 | 批次项目、单独选址项目，或 `一码管地报批相关材料汇总提供` 等多项目汇编包 |
+| S4 | `4.土地供应阶段` | 土地供应 | `出让/划拨` → 年度/整理层 → 单宗地项目，或网交地批复下的多个 `DX...` 独立宗地 |
+| S5 | `5.土地首次登记` | 土地首次登记 | `土地首次登记附件` 汇总层下的 `360122...` 独立地籍宗地单元 |
+| S6 | `6.用地规划` | 用地规划 | 以统一项目代码或工程名称命名的项目大目录，内含申请表/合同/四址等材料夹 |
+| S7 | `7.工程规划` | 工程规划 | 以统一项目代码或工程名称命名的项目大目录，内含设计方案/申请表/证明文件等材料夹 |
+
+---
+
+## 三、Agent 语义判断标准（5 类节点定义）
+
+Agent 必须结合上下级目录关系、文件名称、材料内容摘要与代码线索，将每个待研判目录归入以下 5 类之一：
+
+1. **`project`（独立项目大目录）**
+   - 对应单一建设项目、单一用地报批单元或单一供地/登记宗地。
+   - 注意：项目目录名不一定包含“项目”二字（如道路工程名 `G105...改建工程`、地块名、交易编号 `DXJJ2018002`、地籍号 `360122...`、统一代码 `2017-360199-...`）。
+   - 不能仅因为目录在第一级或最深一级就认定为项目，也不能仅因为不在排除规则中就认定为项目。
+2. **`collection`（多项目汇总 / 批次 / 归档容器）**
+   - 包含多个独立子项目或多个独立宗地的父级容器（例如：`一码管地报批相关材料汇总提供`、含多个 `DX...` 宗地子目录的 `赣国土资网交地【2018】XJ002号`、`土地首次登记附件`）。
+   - 必须继续向下展开并识别每个独立子项目（`project`），严禁将汇总容器本身缓存为项目而吞并子项目。
+3. **`classification`（业务分类 / 年份分类目录）**
+   - 按业务类别、年份、档案整理状态划分的目录（例如：`出让`、`划拨`、`04出让档案整理`、`2020年度`、`土地变更协议`、`延期开工`、`没找到的`）。
+4. **`material`（项目内部材料分类子目录）**
+   - 隶属于某个具体项目内部的材料文件夹（例如：`PDF`、`CAD`、`矢量`、`报批材料`、`1项目红线与权属`、`4用地批复`、`01用地预审与选址意见书阶段`、`建设用地规划许可证申请表`、`宗地图`、`回复函`）。
+   - 必须归属到其上级 `project` 大目录，绝不能单独注册为项目。
+5. **`unresolved`（证据不足，暂无法确定）**
+   - 目录名宽泛（如仅写 `绿地`、`8 延期开工 赣江集团`）且内部为空或缺乏能够指明具体项目/宗地的材料证据。
+   - **铁律**：证据不足时不得猜测，必须标记为 `unresolved`（`needs_review: true`），保留为未归属状态供人工复核。
+
+---
+
+## 四、完整 10 步标准执行流程
+
+Agent 执行本技能时，严格按照以下顺序推进（支持增量复用与断点续跑）：
+
+### 步骤 1：发现及检查七阶段资料与已存库概览
+运行 `summary` 查看当前项目目录库状态、已识别项目数、待复核项目与 `unresolved` 节点：
 ```powershell
-python gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py
-# 只执行 M1，不新增 M2 材料哈希计算
-python gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M1
-# 独立 M2（默认）
-python gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M2
-# 联合执行，可用 --source 指定已具备七阶段子目录的数据源
-python gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M1 M2 --source "F:\项目数据\赣江一张图"
+$env:PYTHONPATH = "gan-jiang-one-map-data-analyse;gan-jiang-one-map-data-analyse/scripts;gan-jiang-one-map-data-analyse/work/python_packages"
+$py = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py summary
 ```
 
-### 方式 2：服务端 API 触发
-启动治理工作台服务后，前端调用：
-`POST /api/folder-mount/scan` （参数：`{"methods": ["M2"]}`）
+### 步骤 2：分层获取七阶段目录树结构（上下文控制）
+先通过 `inspect-tree` 查看各阶段顶层及浅层目录结构（不要一次性把所有文件内容塞入上下文）：
+```powershell
+# 查看全部阶段浅层目录树（或加 --only-pending 仅看新目录、变更目录和存疑目录）
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py inspect-tree --max-depth 2 --only-pending
 
-也支持 `{"methods":["M1"]}`、`{"methods":["M1","M2"]}`。前端方法选择与 API 参数一致。
-扫描会按已有流程规整散落文书并原地解压，真实数据验证应使用工作区副本；只读核验源材料时不要直接启动该写入流程。
+# 对存在多项目汇总或深层结构的阶段/路径按需展开
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py inspect-tree --stage S3 --path "一码管地报批相关材料汇总提供" --max-depth 2
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py inspect-tree --stage S4 --path "出让" --max-depth 3
+```
 
-## 审核、缓存与异常
+### 步骤 3：智能研判项目大目录与上下级关系
+Agent 根据 `inspect-tree` 返回的 `child_dir_names`、`sample_files`、`detected_codes`、`db_decision`、`db_project` 及 `needs_agent_review` 标记，分析父子目录语义关系：
+- 对已判断且 `structure_version` 未变化、`needs_agent_review == false` 的目录直接复用缓存；
+- 对新目录、结构变化目录、父目录疑似多项目容器、或被标记为 `boundary_review` 的目录进行重点研判。
 
-- 重复测试需要清除历史状态时，用户可双击项目根目录 `一键清理采集数据.bat`（实现 `clean-data.ps1`），或先使用 `预览清理范围.bat`。清理会关闭默认工作台，删除项目 work/ 内除 python_packages、cad_runtime 外的全部内容、outputs/、解压材料/ 内容及 cache_reuse.json，并清空 reviewed_fields.json。包括目录库、代码/哈希/正文缓存、人工确认、上传任务副本和导出；保留源材料、源内已有解压目录及 test_result.xlsx。运行前结束独立扫描进程，完成后重新启动工作台。不得把仅要求创建脚本理解为立即清理真实数据的授权。
-- Windows PowerShell 5.1 删除深层 Office 临时目录时，必须在普通绝对路径通过边界检查后使用 `\\?\` 扩展路径访问、枚举与删除；不能将长路径造成的“路径不存在”直接忽略并报告清理成功。
+### 步骤 4：按需读取代表性材料摘要（深入取证）
+当仅凭目录名和文件名无法确定边界（如编号目录、缩写目录、疑似多项目汇编或空壳目录）时，调用 `inspect-node` 并开启 `--read-files` 读取代表性文件前部摘要（PDF/DOCX/TXT 等）：
+```powershell
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py inspect-node --stage S4 --path "出让/04出让档案整理/土地变更协议/绿地" --read-files --max-files 5
+```
 
-- 同一目录对用稳定目录 ID 关联，显示一次；M1/M2 证据可分别筛选查看，七阶段及全部21组阶段组合均可筛选。
-- 所有自动结果均为候选或需复核；项目代码不是宗地主键，多项目代码不得按来源优先级静默覆盖。
-- 保存人工决定及历史。新增方法、原有证据签名或目录边界/歧义上下文变化时，派生状态为需复核；保留原决定及各方法原签名，不自动套用确认。
-- M1 材料缓存按逻辑来源、大小、mtime、ctime、解析版本复用；新增、修改和删除会更新索引。只复用版本完整匹配的原生 PDF 文字缓存，旧版缺少 ctime 的解析结果重新读取。未绑定源版本的旧 OCR/字段结果不作为精确证据，不启动强制 OCR。
-- 可读正文：原生文字 PDF（逐文件45秒超时）、DOCX、XLSX/XLSM、UTF-8/GB18030 文本及 JSON 明确字段。扫描图片、旧 DOC/XLS、未知格式记录跳过，不推测代码。文本/DOCX XML 超20MB记录限制原因。
-- Web 与独立脚本使用同一异常分类：已知损坏/加密成员记录并跳过，其他异常默认阻断，包括越界、链接、文件并发变化、磁盘不足、未验证材料冲突、工具缺失。旧 `tolerate_corrupted` 参数不能绕过安全阻断。
-- `file_count` 为材料条目数，`materials` 为过滤空文件/旁文件/临时文件后的有效材料，`hashed_count` 为已取得哈希的材料数；`skip_statistics` 和阶段 `skipped` 明确记录差异。M1 单独执行可复用已有哈希，但不新增计算。
-- 本轮界面使用最近一次成功运行的所选方法结果；各方法最近运行快照独立留存，不自动把未重扫的历史证据合入当前结果。
+### 步骤 5：校验并将项目边界及其证据持久化存库
+Agent 将语义判断整理为结构化 JSON 文件（如 `gan-jiang-one-map-data-analyse/work/folder_mount/agent_decisions.json`），调用 `apply-decisions` 经程序严格校验后存入 SQLite 与 JSON 目录库：
+```powershell
+& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py apply-decisions --file gan-jiang-one-map-data-analyse/work/folder_mount/agent_decisions.json
+```
 
-## 核心判定规则与产物
-- `PDF/CAD/SHP/Word/Excel` 等格式分类层（大小写不敏感）属于材料子目录，不能自动认作项目大目录；加载旧库时同样排除，人工指定边界保留。
-- 压缩包内的逻辑来源仅用于追溯；项目打开路径沿已校验材料的实体父目录定位，不把 `.zip/成员` 直接当磁盘目录。API 仅展示数据源内真实存在的目录，并过滤失效候选及其关联。
-- 目录规则升级后，旧关联保持历史状态；重启服务后过滤旧展示，成功重新扫描后才可继续确认。不得直接改名为项目或沿用旧确认来掩盖误判。
-- 七阶段首次遇到格式/年份容器时也必须跳过，不能仅在加载旧库时过滤；没有识别到实际项目的汇编包始终为未归属材料，不把阶段根目录登记为压缩包项目。
-- 成功扫描快照优先于失败盘点，旧 `inventory.json` 不得覆盖历史成功关系。仅在没有成功快照、且盘点规则版本等于当前版本时显示盘点目录；Web与独立脚本的失败盘点均保存方法和规则版本。升级后的历史关系可查看，重新成功扫描前不可审核。
-- **原地解压记录**：`gan-jiang-one-map-data-analyse/解压材料/解压记录.sqlite`
-- **项目大目录仓储**：`gan-jiang-one-map-data-analyse/work/folder_mount/project_catalog.json`
-- **关联与扫描结果**：`gan-jiang-one-map-data-analyse/work/folder_mount/result.json`
-- **附件哈希缓存**：`gan-jiang-one-map-data-analyse/work/folder_mount/hashes.json`
-- **项目代码及版本缓存**：`work/folder_mount/project_catalog.sqlite` 中 `project_codes`、`project_code_cache` 表；完整代码证据亦在本次 `result.json.project_code_index` 中。
-- **各方法最近运行快照**：`work/folder_mount/result-M1.json`、`result-M2.json`（联合执行的快照包含双方方法证据，按 `method_evidence` 分开）。
-- **人工审核历史**：`work/folder_mount/decisions.json`，保留规则、证据签名、方法签名、上下文和历史。
-- **M1 统计**：`result.json.m1_statistics` 包含有代码目录数、不同代码、跨阶段候选、歧义、冲突、未识别、未关联、读取失败和正文跳过原因。
+#### Agent 决策输入 JSON 格式规范：
+```json
+{
+  "decisions": [
+    {
+      "stage_id": "S3",
+      "rel_path": "一码管地报批相关材料汇总提供",
+      "node_type": "collection",
+      "reason": "多项目报批材料汇总包，内含01至10共10个独立报批项目",
+      "evidence_paths": [
+        "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地"
+      ],
+      "confidence": "high",
+      "needs_review": false,
+      "children": [
+        {
+          "stage_id": "S3",
+          "rel_path": "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地",
+          "node_type": "project",
+          "project_name": "01赣江新区2025年度第01批次集镇建设用地",
+          "reason": "汇总包内第01号独立批次报批项目，含红线、公告、组卷、批复4类材料子目录",
+          "evidence_paths": [
+            "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地/1项目红线与权属"
+          ],
+          "project_codes": [],
+          "confidence": "high",
+          "needs_review": false,
+          "children": [
+            {
+              "stage_id": "S3",
+              "rel_path": "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地/1项目红线与权属",
+              "node_type": "material",
+              "parent_project_root": "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地",
+              "reason": "项目内部的红线与权属材料子目录",
+              "evidence_paths": [
+                "一码管地报批相关材料汇总提供/01赣江新区2025年度第01批次集镇建设用地/1项目红线与权属"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+- **校验保护规则**：
+  - `stage_id`、`rel_path`、`node_type`、`reason` 必填；
+  - `rel_path` 与 `evidence_paths` 中的每一个路径必须在磁盘（或对应 `.解压` 目录）真实存在，否则程序抛出 `ValueError` 拒绝入库；
+  - 若某目录已处于人工确认状态（`status == 'manual'`），程序自动保护并跳过覆盖；
+  - 若父目录被判定为 `collection` 或其下新增了 `project` 子项目，程序自动解除旧数据库中对该父目录的错误单项目锁定，并记录到 `boundary_history`。
+  - 如需清理磁盘上已不存在的非人工确认历史遗留记录，可执行：`& $py gan-jiang-one-map-data-analyse/scripts/project_catalog.py prune-stale`。
+
+### 步骤 6 & 步骤 7 & 步骤 8：按“M2 相同附件匹配 → M1 代码补漏及交叉校验 → 统一目录关系”顺序执行关联
+项目大目录边界确定后，执行 `run_stage_mount.py`：
+```powershell
+# 推荐：M2 + M1 联合执行（内部严格按：增量解压与目录归属 → M2 SHA-256 精确匹配 → M1 项目代码提取、补漏与交叉校验 → 统一合并关系）
+& $py gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M1 M2 --source "F:\项目数据\赣江一张图"
+
+# 也可单独运行 M2 或单独运行 M1（单独运行 M1 不新增计算 M2 附件哈希）
+& $py gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M2
+& $py gan-jiang-one-map-data-analyse/scripts/run_stage_mount.py --methods M1
+```
+- **M2 执行规则**：
+  - 支持七阶段任意两阶段（全部 21 组阶段对）跨阶段比较；
+  - 以有效文件完整 SHA-256 完全一致作为证据；
+  - 关联关系挂接在双方项目大目录（`project`），证据明细保留实际命中的内部材料小目录（`left_small_dirs` / `right_small_dirs`）与文件。
+- **M1 执行规则**：
+  - 检查全部项目大目录，从目录名、子目录名、文件名及原生文档正文（PDF/DOCX/XLSX/CSV/JSON，及可选按需 OCR）分级（A/B/C）提取完整标准化项目代码；
+  - **补漏**：补充 M2 未发现的跨阶段项目大目录关系；
+  - **交叉校验**：对已由 M2 关联的目录追加 `m1_validation`（`corroborated` 双方代码一致印证、`conflict` 双方可靠代码无交集冲突、`missing_left/right/both` 缺码、`unresolved_ownership` 多代码归属未明）；
+  - **多宗地保护**：同一项目代码对应同阶段多个宗地目录时，保留多条独立候选关系并标记 `ambiguous`，绝不自动合并宗地。
+- **统一目录关系**：
+  - 同一对项目大目录被 M1 和 M2 同时命中时，以稳定目录对 ID 归并为**唯一一条关系**（`evidence_type: "M1+M2"`，`methods: ["M1", "M2"]`），并在 `method_evidence` 与 `method_signatures` 中完整保留 M1、M2 各自原始证据与签名。
+
+### 步骤 9：反向边界复核与冲突/不确定项目提交人工复核
+- 当 M1 发现单一项目目录内含多个不同项目代码且无法确定局部归属，或同阶段多个目录共用同一项目代码，或 M2 发现同阶段多个项目共用相同附件时，程序自动调用 `catalog.flag_boundary_review()` 将相关目录标记为 `boundary_review = True`（`status = 'review'`）。
+- 当双方代码冲突（`conflict`）或目录边界/审核上下文发生变化时，关系自动进入 `status = 'review'`（需人工复核），绝不自动确认。
+- Agent 可再次运行 `project_catalog.py summary` 查看新增的 `review_projects` 和 `unresolved_directories`，必要时回溯步骤 4~5 进一步细分目录边界，或保留供人工在工作台复核。
+
+### 步骤 10：保存结果与断点续跑
+所有中间与最终产物自动持久化落盘，支持随时中断后继续执行：
+- **项目大目录与 Agent 决策库**：`work/folder_mount/project_catalog.sqlite`（含 `projects`、`directory_decisions`、`boundary_history`、`project_codes`、`relation_snapshots` 表）及镜像 `work/folder_mount/project_catalog.json`
+- **Agent 语义判断文件**：`work/folder_mount/agent_decisions.json`
+- **原地解压索引**：`解压材料/解压记录.sqlite`
+- **M2 附件哈希缓存**：`work/folder_mount/hashes.json`
+- **统一关联结果与各方法快照**：`work/folder_mount/result.json`、`result-M1.json`、`result-M2.json`
+- **人工审核记录**：`work/folder_mount/decisions.json`
+
+---
+
+## 五、全量验收与回归测试命令
+
+1. **运行单元测试回归**：
+```powershell
+$env:PYTHONPATH = "gan-jiang-one-map-data-analyse;gan-jiang-one-map-data-analyse/scripts;gan-jiang-one-map-data-analyse/work/python_packages"
+$py = "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+& $py gan-jiang-one-map-data-analyse/scripts/test_folder_mount.py -v
+& $py gan-jiang-one-map-data-analyse/scripts/test_joint_mount.py -v
+& $py gan-jiang-one-map-data-analyse/scripts/test_project_codes.py -v
+& $py gan-jiang-one-map-data-analyse/scripts/test_m1_recognition.py -v
+```
+
+2. **运行七阶段副本全量验收**：
+```powershell
+& $py gan-jiang-one-map-data-analyse/scripts/verify_joint_mount.py --source "完整副本目录" --output "工作区验收输出目录"
+```
+验收脚本在确保不移动、不修改任何原始文件的前提下，顺序校验 M2、M1、M1+M2 联合结果及全部 21 组阶段对统计，并输出 `acceptance.json`。
