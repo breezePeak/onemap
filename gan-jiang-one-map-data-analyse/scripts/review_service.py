@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 import openpyxl
 from openpyxl.utils import get_column_letter
@@ -26,7 +27,14 @@ def read_json(path,default=None):
 
 def write_json(path,value):
     path.parent.mkdir(parents=True,exist_ok=True)
-    temp=path.with_suffix(path.suffix+'.tmp');temp.write_text(json.dumps(value,ensure_ascii=False,default=str),encoding='utf-8');temp.replace(path)
+    temp=path.with_suffix(path.suffix+'.tmp');temp.write_text(json.dumps(value,ensure_ascii=False,default=str),encoding='utf-8')
+    for attempt in range(4):
+        try:
+            temp.replace(path)
+            return
+        except PermissionError as error:
+            if os.name!='nt' or getattr(error,'winerror',None) not in (5,32,33) or attempt==3: raise
+            time.sleep(0.05*(attempt+1))
 
 def value_json(value):
     return value.isoformat()[:10] if isinstance(value,(dt.date,dt.datetime)) else value
