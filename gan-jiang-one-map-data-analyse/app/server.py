@@ -1,4 +1,4 @@
-"""仅监听本机的第一阶段目录关联与冲突管理工作台（第二、三阶段业务数据生成接口已隔离禁用）。"""
+"""仅监听本机的目录关联、项目数据提取与数据制表工作台。"""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
@@ -28,14 +28,12 @@ from project_codes import RULE_VERSION as M1_RULE_VERSION
 def get_catalog_projects():
     cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
     try:
-        cat.ensure_agent_decisions_applied()
         return [p for p in cat.projects.values() if Path(p['physical_path']).is_dir() and Path(p['physical_path']).resolve().is_relative_to(SOURCE.resolve())]
     finally: cat.close()
 
 def get_catalog_unresolved_decisions():
     cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
     try:
-        cat.ensure_agent_decisions_applied()
         return [d for d in cat.decisions.values() if d.get('node_type')=='unresolved' or d.get('status') in ('review','unresolved')]
     finally: cat.close()
 
@@ -342,7 +340,7 @@ def mount_conflicts(params=None):
         if not f_obj:
             continue
         counts['unresolved_ownership'] += 1
-        codes = sorted({e['canonical_code'] for e in ev_list if e.get('canonical_code')})
+        codes = sorted({e['normalized_code'] for e in ev_list if e.get('normalized_code')})
         items.append(dict(
             item_type='code_ownership',
             id=f'code:{dir_id}',
@@ -401,7 +399,7 @@ def mount_conflicts(params=None):
 
 
 def mount_view(params=None):
-    params=params or {}; result=mount_result(); state=dict(MOUNT_STATE)
+    params=params or {}; result=mount_result(); state=dict(read_json(MOUNT_DIR/'task.json',MOUNT_STATE))
     if state['status']=='idle' and result.get('scanned_at'):
         state.update(status='ready',phase='已载入 Skill 扫描关联结果')
     historical=bool(result.get('scanned_at')) and (state['status']!='ready' or result.get('rule_version')!=RULE_VERSION
@@ -448,7 +446,7 @@ def mount_view(params=None):
     return response
 
 
-# 以下为第二、三阶段预留底层能力（第一阶段已隔离，不对外暴露 HTTP 接口）
+# 项目数据提取、人工核验与成果导出。
 POOL=ThreadPoolExecutor(max_workers=1)
 STATS_POOL=ThreadPoolExecutor(max_workers=8)
 LOCKS={}
@@ -557,7 +555,7 @@ def refresh_matching(job):
     except Exception as error:update(job,status='failed',phase='重算失败',error=str(error))
 
 
-STAGE1_DISABLED_MSG = '第一阶段仅开放目录关联与冲突管理功能，业务数据自动生产、Excel制表与前端触发扫描接口已禁用。'
+STAGE1_DISABLED_MSG = '目录扫描与关联由 Agent 技能执行，请在工作台查看结果和人工审核。'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -627,9 +625,57 @@ class Handler(BaseHTTPRequestHandler):
                     evidence=[e for e in link.get('evidence',[]) if query in mount_search(e) and (method=='all' or e.get('method','M2')==method)]
                     pages=max(1,(len(evidence)+19)//20); page=min(page,pages)
                     return self.json(dict(id=link['id'],signature=link['signature'],confirmation=link.get('confirmation'),evidence=evidence[(page-1)*20:page*20],page=page,pages=pages,count=len(evidence)))
-            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('storage','jobs','datafiles','current'):
-                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
-            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','mount.js':'mount.js'}
+            if parts==['api','storage']:
+                params=parse_qs(urlsplit(self.path).query)
+                return self.json(storage_info(BASE,SOURCE,params.get('kind',['archive'])[0],params.get('q',[''])[0],int(params.get('page',['1'])[0])))
+            if parts==['api','jobs']:
+                jobs=[dict(id=p.parent.name,**read_json(p,{})) for p in JOBS.glob('*/meta.json')]
+                return self.json(sorted(jobs,key=lambda x:x.get('created_at',''),reverse=True))
+            if parts==['api','jobs','stats']:
+                metas=[(p.parent.name,read_json(p,{})) for p in JOBS.glob('*/meta.json')]
+                metas.sort(key=lambda x:x[1].get('created_at',''),reverse=True)
+                futures=[(ident,meta,STATS_POOL.submit(entry_info,JOBS/ident)) for ident,meta in metas]
+                jobs=[]
+                for ident,meta,future in futures:
+                    try:info=future.result(timeout=60)
+                    except Exception:info=dict(is_dir=True,size_bytes=0,file_count=0,modified=None)
+                    jobs.append(dict(id=ident,directory=str((JOBS/ident).resolve()),**meta,**info))
+                return self.json(jobs)
+            if parts==['api','datafiles']:
+                entries,total=datafile_entries()
+                return self.json({'entries':entries,'total_bytes':total})
+            if len(parts)>=3 and parts[:2]==['api','jobs']:
+                job=job_path(parts[2])
+                if len(parts)==3:
+                    state=read_json(job/'meta.json');log=job/'console.log'
+                    state['artifacts']=(job/'outputs/governance/治理成果.zip').is_file()
+                    if log.exists():
+                        with log.open('rb') as f:f.seek(max(0,log.stat().st_size-50000));state['logs']=f.read().decode('utf-8',errors='replace')[-30000:]
+                    return self.json(state)
+                if parts[3]=='review':
+                    review=read_json(job/'review.json')
+                    if review is None:raise ValueError('检索尚未完成。')
+                    review['spatial_projects']=[str(r['project']) for r in read_json(job/'work/spatial_matches.json',[])]
+                    return self.json(resolve_review(review))
+                if parts[3]=='spatial' and len(parts)==5:
+                    if read_json(job/'meta.json')['status']!='ready':raise ValueError('检索完成后可查看空间图。')
+                    with LOCKS.setdefault(parts[2],threading.RLock()):
+                        return self.json(spatial_preview(job,unquote(parts[4])))
+                if parts[3]=='download':return self.file(job/'outputs/governance/test_result_已填充.xlsx',True)
+                if parts[3]=='audit':return self.file(job/'outputs/governance/用户选择与来源.json')
+                if parts[3]=='log':return self.file(job/'console.log',True)
+                if parts[3]=='queue':return self.file(job/'outputs/governance/待复核队列.jsonl',True)
+                if parts[3]=='unassociated':return self.file(job/'outputs/governance/未关联材料.jsonl',True)
+                if parts[3]=='recognition':return self.file(job/'outputs/governance/材料识别统计.json',True)
+                artifacts={'bundle':'治理成果.zip','selection':'选址意见书信息提取.xlsx','new-projects':'项目表_含补建项目.xlsx','vectors':'附件矢量清单.xlsx','missing-shp':'缺少SHP项目.xlsx','mapping':'监管号与单元号映射.xlsx','materials':'阶段材料清单.xlsx','results':'成果生成统计.json','source-errors':'来源异常清单.xlsx','resolution':'整体挂接消歧.xlsx','cad':'CAD实体清单.xlsx','cad-status':'CAD读取状态.xlsx','coordinate-pending':'矢量坐标待确认.xlsx'}
+                if parts[3] in artifacts:return self.file(job/'outputs/governance'/artifacts[parts[3]],True,True)
+                if parts[3]=='source' and len(parts)==5:
+                    source=read_json(job/'review.json')['sources'].get(parts[4])
+                    if not source or not source.get('path'):raise FileNotFoundError('来源仅有属性证据，请查看来源详情。')
+                    path=Path(source['path']).resolve()
+                    if not any(path.is_relative_to(p.resolve()) for p in (BASE,SOURCE)):raise ValueError('来源不在项目或数据源目录内。')
+                    return self.file(path,path.suffix.lower() not in ('.pdf','.jpg','.jpeg','.png','.bmp'))
+            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','mount.js':'mount.js','spatial.js':'spatial.js','matching.js':'matching.js'}
             path=urlsplit(self.path).path.lstrip('/')
             if path not in allowed:raise FileNotFoundError('页面不存在。')
             return self.file(BASE/'app/static'/allowed[path])
@@ -641,8 +687,23 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if origin and origin!=f'http://{self.headers.get("Host")}':return self.json({'error':'不接受其他网页发起的操作。'},403)
             parts=urlsplit(self.path).path.strip('/').split('/')
-            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('jobs','datafiles','storage'):
-                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
+            if len(parts)==3 and parts[:2]==['api','jobs']:
+                job=job_path(parts[2])
+                if read_json(job/'meta.json',{}).get('status') in ('queued','running'):raise ValueError('任务正在处理，暂不能删除。')
+                with LOCKS.setdefault(parts[2],threading.RLock()):
+                    remove_tree(job)
+                LOCKS.pop(parts[2],None)
+                return self.json({'deleted':parts[2]})
+            if len(parts)>=3 and parts[:2]==['api','datafiles']:
+                key=unquote('/'.join(parts[2:]));match=re.fullmatch(r'(work|outputs)/([^/]+)',key)
+                if not match:raise ValueError('数据条目无效。')
+                root,name=match.groups();path=(BASE/root/name).resolve();parent=path.parent.resolve()
+                if not (parent==(BASE/root).resolve() and parent.is_relative_to(BASE.resolve())):raise ValueError('数据条目不在允许的目录内。')
+                if root=='work' and name in PROTECTED_WORK_ENTRIES:raise ValueError('该项为程序依赖或任务数据，不可在此删除。')
+                if not path.exists():raise FileNotFoundError('数据条目不存在，请刷新列表。')
+                if path.is_dir():remove_tree(path)
+                else:path.unlink()
+                return self.json({'deleted':key})
             raise FileNotFoundError('接口不存在。')
         except (ValueError,KeyError) as e:self.json({'error':str(e)},400)
         except FileNotFoundError as e:self.json({'error':str(e)},404)
@@ -682,8 +743,40 @@ class Handler(BaseHTTPRequestHandler):
                     decisions[link['id']]=dict(status=status,signature=link['signature'],review_context=link.get('review_context'),method_signatures=link.get('method_signatures',{'M2':link['signature']}),rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
                     write_json(MOUNT_DIR/'decisions.json',decisions)
                     return self.json(mount_view())
-            if len(parts)>=2 and parts[0]=='api' and parts[1] in ('jobs','current','storage','datafiles'):
-                return self.json({'error': STAGE1_DISABLED_MSG}, 403)
+            if parts in (['api','jobs'],['api','current']):
+                payload=self.body() if parts==['api','jobs'] else (BASE/'test_result.xlsx').read_bytes()
+                name=unquote(self.headers.get('X-Filename','test_result.xlsx'))
+                if not name.lower().endswith('.xlsx'):raise ValueError('仅支持 .xlsx 文件。')
+                ident=uuid.uuid4().hex[:16];job=JOBS/ident;job.mkdir(parents=True)
+                (job/'test_result.xlsx').write_bytes(payload)
+                try:validate_upload(job/'test_result.xlsx')
+                except Exception:
+                    (job/'test_result.xlsx').unlink();job.rmdir();raise
+                write_json(job/'meta.json',dict(filename=name,status='queued',phase='等待检索',progress=0,created_at=datetime.now().isoformat(timespec='seconds')))
+                LOCKS[ident]=threading.RLock()
+                POOL.submit(execute,job)
+                return self.json({'id':ident},202)
+            if len(parts)==4 and parts[:2]==['api','jobs']:
+                ident=parts[2];job=job_path(ident);lock=LOCKS.setdefault(ident,threading.RLock())
+                with lock:
+                    if parts[3]=='rerun':
+                        if read_json(job/'meta.json')['status'] not in ('ready','failed'):raise ValueError('任务正在处理，请等待当前处理结束。')
+                        update(job,status='queued',phase='重新检索当前任务',progress=0,error=None)
+                        POOL.submit(execute,job)
+                        return self.json({'id':ident},202)
+                    if read_json(job/'meta.json')['status']!='ready':raise ValueError('检索未完成，暂不能选择或导出。')
+                    actions={'judgement':save_judgement,'alias':save_alias,'coordinate-system':save_coordinate_system,'relationship':save_relationship_decision}
+                    if parts[3] in actions:
+                        result=actions[parts[3]](job,json.loads(self.body(65536)))
+                        update(job,status='queued',phase='按人工证据重新匹配',progress=0);POOL.submit(refresh_matching,job)
+                        return self.json(dict(result,id=ident),202)
+                    if parts[3]=='georeference':return self.json(save_georeference(job,json.loads(self.body(65536))))
+                    if parts[3]=='choice':
+                        payload=json.loads(self.body(65536));review=save_choice(job,payload['cell'],payload.get('candidate_id'),payload.get('confirm_project') is True)
+                        return self.json(review)
+                    if parts[3]=='export':
+                        export_review(job)
+                        return self.json({'download':f'/api/jobs/{ident}/download','audit':f'/api/jobs/{ident}/audit'})
             raise FileNotFoundError('接口不存在。')
         except (ValueError,KeyError,json.JSONDecodeError) as e:self.json({'error':str(e)},400)
         except FileNotFoundError as e:self.json({'error':str(e)},404)

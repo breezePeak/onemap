@@ -48,8 +48,14 @@ def directory_name(value):
 
 def folder_entry(path, source, root, catalog=None):
     root = Path(root); path = Path(path)
+    def without_archive_wrappers(parts):
+        # 包内同名根目录属于同一层，避免“出让.zip!出让”绕过已存库边界。
+        return [part for i, part in enumerate(parts) if not (
+            i + 1 < len(parts) and part.lower().endswith(('.zip', '.rar', '.7z', '.解压'))
+            and normalize_dir_name(part) == normalize_dir_name(parts[i + 1]))]
+
     relative = source.replace('\\', '/')[len(root.as_posix()) + 1:]
-    parts = [p for p in re.split(r'[/!]', relative) if p]
+    parts = without_archive_wrappers([p for p in re.split(r'[/!]', relative) if p])
     stage = next((sid for sid, name in STAGES if parts and name == parts[0]), None)
     if not stage:
         return None
@@ -72,7 +78,7 @@ def folder_entry(path, source, root, catalog=None):
         catalog = ProjectCatalog(root=root)
     stage_root = root / dict(STAGES)[stage]
     physical_parts = path.relative_to(stage_root).parts if path.is_relative_to(stage_root) else ()
-    phys_dir_parts = physical_parts if is_dir else physical_parts[:-1]
+    phys_dir_parts = without_archive_wrappers(physical_parts if is_dir else physical_parts[:-1])
     # 复用原地已有成员时，实体目录边界优先，避免外包名重复造成同目录双重登记。
     proj_info = catalog.find_in_database(stage, phys_dir_parts)
     if not proj_info and phys_dir_parts and '!' in source and not any(p.endswith('.解压') for p in phys_dir_parts):

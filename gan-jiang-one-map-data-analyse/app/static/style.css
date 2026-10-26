@@ -187,6 +187,11 @@ td:first-child{position:sticky;left:0;z-index:1;padding:4px 6px;background:#f8fa
 
 .mount-small-dir-tag { font-size: 11px; color: #475569; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; margin: 4px 0; word-break: break-all; border-left: 2px solid #3b82f6; }
 
+#directoryModule{display:flex;flex:1;flex-direction:column;min-height:0;gap:4px}
+.mount-subtabs{display:flex;gap:8px;padding:4px 10px}
+.mount-subtabs button{padding:6px 14px;border:1px solid var(--line);border-radius:5px;background:white}
+.mount-subtabs button.active{background:var(--green);color:white}
+
 /* 冲突管理与审核历史样式 */
 .conflict-summary-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0; flex-shrink: 0; }
 .conflict-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border: 1px solid #cbd7d0; border-radius: 16px; background: #f8faf9; color: #244738; font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s; }
@@ -210,3 +215,25 @@ td:first-child{position:sticky;left:0;z-index:1;padding:4px 6px;background:#f8fa
 .audit-history-list { margin: 6px 0 0; padding-left: 18px; color: #374151; line-height: 1.6; }
 
 
+
+/* 目录关联只展示项目与阶段大表。 */
+.mount-simple-toolbar,.mount-simple-footer{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mount-simple-toolbar input[type=search]{padding:7px 10px;width:230px;max-width:100%;border:1px solid var(--line);border-radius:4px}
+.mount-stage-toggles{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mount-stage-toggles label,.mount-candidate-label{display:flex;align-items:flex-start;gap:5px;cursor:pointer}
+.mount-stage-toggles input,.mount-candidate-label input{flex:none;margin-top:3px}
+.mount-table-hint{margin:6px 0;font-size:11px}
+.mount-simple-footer{padding-top:8px}.mount-simple-footer>span:first-child{margin-right:auto}
+#mountTable .mount-projects{table-layout:fixed;width:100%;min-width:1100px}
+#mountTable .mount-projects th,#mountTable .mount-projects th:last-child,#mountTable .mount-projects td{width:auto;min-width:0;padding:10px}
+#mountTable .mount-projects th:first-child,#mountTable .mount-projects td:first-child{position:sticky;left:0;width:210px;min-width:210px;background:#fff;z-index:1}
+#mountTable .mount-projects thead th{background:#edf2ec;z-index:2}
+#mountTable .mount-projects thead th:first-child{z-index:3}
+#mountTable .mount-projects th:last-child,#mountTable .mount-projects td:last-child{position:sticky;right:0;width:115px;min-width:115px;background:#fff;z-index:1}
+#mountTable .mount-projects thead th:last-child{background:#edf2ec;z-index:3}
+.mount-audit-cell>small{display:block;margin-bottom:5px;color:var(--muted)}
+.mount-stage-items{max-height:300px;overflow:auto}
+.mount-stage-project{padding:6px 0}.mount-stage-project+.mount-stage-project{border-top:1px solid var(--line)}
+.mount-stage-project .manager-path{display:block;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
+.mount-stage-project>small{font-size:10px;color:var(--muted)}.mount-candidate>small.mount-warning{color:#9a6700}
+.mount-candidate-label{font-weight:600;margin-bottom:4px}

@@ -563,7 +563,7 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(scan_res['links'][0]['right']['name'], '人工锁定规划项目A')
 
     def test_stage1_api_isolation_and_conflicts_and_agent_gate(self):
-        """测试第一阶段禁用业务数据生成与前端扫描 API（返回 403）、冲突管理聚合视图及 Agent 闭环门禁。"""
+        """三阶段入口共存，目录扫描仍由 Agent 执行，保留冲突审核与 Agent 门禁。"""
         # 1. 构造含多项目批次目录的数据集，验证未做 Agent 研判时 find_pending_complex_directories 能检出
         self.put(3, '2024年第三批次/子项目1/材料1.pdf', b'batch-1')
         self.put(3, '2024年第三批次/子项目2/材料2.pdf', b'batch-2')
@@ -573,18 +573,15 @@ class FolderMountTests(unittest.TestCase):
         self.assertTrue(any(p['stage_id'] == 'S3' and p['rel_path'] == '2024年第三批次' for p in pending))
         cat.close()
 
-        # 2. 验证第一阶段禁用的 HTTP 接口返回 403
-        for method, path in [
-            ('POST', '/api/folder-mount/scan'),
-            ('POST', '/api/jobs'),
-            ('POST', '/api/current'),
-            ('GET', '/api/jobs'),
-            ('GET', '/api/datafiles'),
-            ('GET', '/api/storage'),
-        ]:
-            payload, status = self.api(path, {'methods': ['M2']} if method == 'POST' else None)
-            self.assertEqual(status, 403, f'{method} {path} should return 403')
-            self.assertIn('第一阶段', payload.get('error', ''))
+        # 2. 目录扫描不能从页面启动，已有数据提取任务可正常读取。
+        payload, status = self.api('/api/folder-mount/scan', {'methods': ['M2']})
+        self.assertEqual(status, 403)
+        self.assertIn('Agent', payload['error'])
+        with patch.object(server, 'JOBS', self.base / 'jobs'):
+            server.write_json(self.base / 'jobs/known/meta.json', {'status': 'ready'})
+            jobs, status = self.api('/api/jobs')
+            self.assertEqual(status, 200)
+            self.assertEqual(jobs, [{'id': 'known', 'status': 'ready'}])
 
         # 3. 验证冲突管理接口 /api/folder-mount/conflicts 与审核历史记录
         self.put(1, '项目C1/共用附件.pdf', b'shared-attachment')
@@ -610,6 +607,21 @@ class FolderMountTests(unittest.TestCase):
             audited_item = next(it for it in audited_data['items'] if it['id'] == link_item['id'])
             self.assertEqual(audited_item['status'], 'pending')
             self.assertEqual(len(audited_item['confirmation']['history']), 2)
+
+    def test_mount_reads_latest_skill_state_without_reapplying_agent_decisions(self):
+        self.put(1, '项目甲/附件.txt', b'shared')
+        self.put(2, '项目乙/附件.txt', b'shared')
+        result, _ = self.scan()
+        mount_dir = self.base / 'mount'
+        server.write_json(mount_dir / 'result.json', dict(result, scanned_at='2026-10-26T18:09:51'))
+        server.write_json(mount_dir / 'task.json', dict(status='ready', phase='技能执行完成'))
+        with (patch.multiple(server, MOUNT_DIR=mount_dir, MOUNT_STATE=dict(status='failed', phase='旧失败状态')),
+              patch.object(ProjectCatalog, 'ensure_agent_decisions_applied', side_effect=AssertionError('读取页面不应重新入库'))):
+            view = server.mount_view({'view': ['projects']})
+            self.assertEqual(view['status'], 'ready')
+            self.assertFalse(view['historical'])
+            self.assertEqual(view['summary']['links'], 1)
+            self.assertTrue(view['rows'])
 
 
 if __name__ == '__main__':

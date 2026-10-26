@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import test_project_codes as fixtures
-from folder_mount import project_rows
+from folder_mount import project_rows, folder_entry
 from project_catalog import ProjectCatalog
 from organize_independent_documents import organize_independent_documents
 from extract_archives import disk_path, ArchiveRecords
@@ -178,6 +178,24 @@ class JointMountTests(unittest.TestCase):
         self.assertEqual((report['m2_standalone_candidates'], report['m1_standalone_candidates'], report['dual_hits']), (1, 1, 1))
         self.assertEqual(report['skip_statistics']['valid_materials'], 2)
         self.assertTrue(all(report['checks'].values()))
+
+    def test_newly_extracted_same_name_wrapper_reuses_agent_boundary(self):
+        relative = '出让/2024年度/DXJJ2024001'
+        material = '05.示意图/a.txt'
+        physical = self.put(4, f'出让.zip.解压/{relative}/{material}', 'shared')
+        catalog = ProjectCatalog(self.storage, self.root)
+        try:
+            catalog.apply_agent_decisions([dict(stage_id='S4', rel_path=relative,
+                node_type='project', reason='独立交易宗地及其内部材料', evidence_paths=[relative])])
+            project_id = next(iter(catalog.projects))
+            sources = [str(physical), str(self.root / fixtures.STAGES[3][1] / '出让.zip') + '!' + relative + '/' + material]
+            for source in sources:
+                entry = folder_entry(physical, source, self.root, catalog)
+                self.assertEqual(entry['business_directory_id'], project_id)
+                self.assertEqual(Path(entry['folder']), physical.parent.parent)
+                self.assertEqual(len(catalog.projects), 1)
+        finally:
+            catalog.close()
 
     def test_archive_subdirectory_code_has_real_directory_source(self):
         self.put(1, '项目甲.zip', fixtures.zip_bytes({f'{CODE}/附件/a.txt': 'material'}))
