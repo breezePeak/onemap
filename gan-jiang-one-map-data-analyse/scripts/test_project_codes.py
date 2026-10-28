@@ -264,6 +264,20 @@ class ProjectCodeTests(unittest.TestCase):
         self.assertEqual(json.loads((self.base/'work/folder_mount/task.json').read_text(encoding='utf-8'))['status'],'failed')
         self.assertEqual((self.base/'work/folder_mount/result.json').read_bytes(),snapshot)
 
+    def test_project_category_counts_and_combined_filter_before_pagination(self):
+        self.put(1, '测试/a.txt', 'a')
+        result, _ = self.scan()
+        rows = [dict(id=str(i), name=str(i), status='pending', unlinked=False, stages={}, links=[]) for i in range(55)]
+        rows += [dict(id='overlap', name='overlap', status='review', unlinked=True, stages={}, links=[]),
+                 dict(id='unlinked', name='unlinked', status='unlinked', unlinked=True, stages={}, links=[]),
+                 dict(id='confirmed', name='confirmed', status='confirmed', unlinked=False, stages={}, links=[])]
+        with patch.object(server, 'project_rows', return_value=rows):
+            for categories, count in [('all', 58), ('review', 56), ('unlinked', 2), ('review,unlinked', 57), ('none', 0)]:
+                view, _ = self.view(result, params={'view': ['projects'], 'categories': [categories], 'page': ['2']})
+                self.assertEqual(view['count'], count)
+                self.assertEqual(view['pages'], max(1, (count + 49) // 50))
+                self.assertEqual((view['summary']['projects'], view['summary']['project_needs_review'], view['summary']['project_unlinked']), (58, 56, 2))
+
     def test_method_status_pair_filters_and_pagination(self):
         for n in range(51):
             code = f'2017-360199-27-03-{n:06d}'
@@ -275,8 +289,9 @@ class ProjectCodeTests(unittest.TestCase):
         view, _ = self.view(result, params={'view':['projects'],'method':['M2']})
         self.assertEqual(view['count'], 102)
         html = (BASE/'app/static/index.html').read_text(encoding='utf-8')
-        self.assertEqual(len(set(re.findall(r'value="(S\d-S\d)"', html))), 21)
-        self.assertRegex(html, r'value="M1">')
+        self.assertIn('id="mountStageToggles"', html)
+        self.assertIn('id="mountQuery"', html)
+        self.assertEqual(set(re.findall(r'data-module="(\w+)"',html)),{'mount','extract','output'})
 
     def test_manual_boundary_saved_and_source_move_requires_review(self):
         self.put(1, f'{CODE}/a.txt', 'a'); self.put(7, f'{CODE}/a.txt', 'b')

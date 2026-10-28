@@ -1,0 +1,20 @@
+{
+  "date": "2026-10-27",
+  "python": {
+    "tests": 190,
+    "passed": 190,
+    "skipped": 0,
+    "environment": "ONEMAP_TEST_OCR=1；允许临时目录联接及Windows OCR",
+    "log": "work/stage2-regression-final.log"
+  },
+  "frontend": [
+    "test_mount_frontend.mjs passed",
+    "test_stage2_ui.mjs passed"
+  ],
+  "real_reports": [
+    "stage2-real-validation.json",
+    "stage2-semantic-real-validation.json"
+  ],
+  "skill_validation": "quick_validate.py passed",
+  "scope": "代码回归和真实抽样验证；全量材料及全部业务场景未最终验收"
+}

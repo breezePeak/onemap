@@ -3,7 +3,9 @@
 let mountPage = 1;
 let mountStageConfig = [];
 let mountData = null;
+let mountRequest = 0;
 const hiddenMountStages = new Set();
+const validMountPage = (value, pages) => /^\d+$/.test(String(value)) && Number(value) >= 1 && Number(value) <= pages ? Number(value) : null;
 
 const mountStatusText = status => ({
   confirmed: '✓ 已人工确认',
@@ -15,9 +17,8 @@ const mountStatusText = status => ({
 }[status] || status);
 
 const mountMethodLabel = methods => {
-  const list = Array.isArray(methods) && methods.length ? methods : ['M2'];
-  if (list.includes('M1') && list.includes('M2')) return 'M1+M2';
-  return list.join('+');
+  const list = Array.isArray(methods) && methods.length ? methods : ['未标明'];
+  return list.map(method => ({ M1: '项目代码相同', M2: '文件内容相同' }[method] || method)).join(' + ');
 };
 
 const mountM1StateText = state => ({
@@ -56,9 +57,9 @@ const mountStageName = stageId => {
   return found ? `${stageId} ${found.title || found.name}` : stageId;
 };
 
-const mountPath = folder => node('a', {
-  href: '#', className: 'manager-path clickable-path', textContent: folder.folder,
-  title: '点击打开目录',
+const mountPath = (folder, label = folder.folder) => node('a', {
+  href: '#', className: 'manager-path clickable-path', textContent: label,
+  title: folder.folder,
   onclick: event => { event.preventDefault(); event.stopPropagation(); openWindowsPath(folder.folder, 'folder'); },
 });
 const mountFolderNode = folder => node('div', {}, [
@@ -143,13 +144,8 @@ const getFileTypeIcon = filename => {
 const renderEvidenceFileCard = (fileObj, stageLabel, previewPane) => {
   const realPath = fileObj.physical_path || fileObj.logical_path || '';
   const fileName = realPath.split(/[\\/!]/).pop() || realPath;
-  const archiveChain = (fileObj.archive_chain || []).map(a => a.split(/[\\/]/).pop()).join(' → ');
-
-  const card = node('div', { className: 'mount-file-card', title: `完整路径：${realPath}` });
-
-  const previewBtn = node('button', { className: 'primary', type: 'button', textContent: '👁️ 右侧预览' });
-  previewBtn.onclick = e => {
-    e.stopPropagation();
+  const card = node('button', { className: 'mount-file-card', type: 'button', title: `完整路径：${realPath}` });
+  card.onclick = () => {
     document.querySelectorAll('.mount-file-card.active').forEach(el => el.classList.remove('active'));
     card.classList.add('active');
     if (previewPane) renderFilePreview(previewPane, fileObj, stageLabel);
@@ -160,56 +156,43 @@ const renderEvidenceFileCard = (fileObj, stageLabel, previewPane) => {
       node('span', { className: 'mount-file-icon', textContent: getFileTypeIcon(fileName) }),
       node('span', { className: 'mount-file-name', textContent: fileName }),
     ]),
-    fileObj.source_location ? node('small', { textContent: `位置：${fileObj.source_location} · ${fileObj.evidence_text || ''}` }) : '',
-    fileObj.small_dir ? node('div', { className: 'mount-small-dir-tag', textContent: `📁 所属子路径：${fileObj.small_dir}` }) : '',
-    archiveChain ? node('span', { className: 'mount-archive-tag', textContent: `📦 来源压缩包：${archiveChain}` }) : '',
-    node('a', {href: '#', className: 'manager-path clickable-path', textContent: realPath, onclick: event => { event.preventDefault(); event.stopPropagation(); openWindowsPath(realPath, 'select'); }}),
-    node('div', { className: 'mount-file-btns' }, [previewBtn])
+    fileObj.source_location ? node('small', { textContent: `${fileObj.source_location} ${fileObj.evidence_text || ''}` }) : ''
   );
-
-  card.onclick = () => previewBtn.click();
   return card;
 };
 
-const mountEvidenceList = (link, box, page = 1, q = '', previewPane = null, method = 'all') => api(`/api/folder-mount/links/${link.id}?page=${page}&q=${encodeURIComponent(q)}&method=${encodeURIComponent(method)}`).then(data => {
+const mountEvidenceList = (link, box, page = 1, q = '', previewPane = null, method = 'all', autoPreview = true) => api(`/api/folder-mount/links/${link.id}?page=${page}&q=${encodeURIComponent(q)}&method=${encodeURIComponent(method)}`).then(data => {
   box.replaceChildren(...data.evidence.map((e, idx) => {
     if (e.method === 'M1' || e.canonical_code) {
       const leftCards = (e.left_sources || []).map(source => renderEvidenceFileCard(source, `${link.left.stage} 代码证据`, previewPane));
       const rightCards = (e.right_sources || []).map(source => renderEvidenceFileCard(source, `${link.right.stage} 代码证据`, previewPane));
-      if (idx === 0 && page === 1 && leftCards[0] && previewPane && !previewPane.dataset.initialized) {
+      if (autoPreview && idx === 0 && page === 1 && leftCards[0] && previewPane && !previewPane.dataset.initialized) {
         previewPane.dataset.initialized = '1';
         setTimeout(() => leftCards[0].click(), 30);
       }
       return node('div', { className: 'mount-evidence' }, [
-        node('div', { className: 'mount-sha-header' }, [
-          node('span', { className: 'mount-sha-tag', textContent: `M1 项目代码 #${(page - 1) * 20 + idx + 1} · ${e.normalized_code}` }),
-        ]),
-        node('p', { textContent: e.explanation || '' }),
+        node('div', { className: 'mount-evidence-label', textContent: `项目代码：${e.normalized_code || e.canonical_code}` }),
         node('div', { className: 'mount-evidence-pair' }, [
-          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title', textContent: `◀ ${link.left.stage} · ${link.left.name}` }), ...leftCards]),
-          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title', textContent: `▶ ${link.right.stage} · ${link.right.name}` }), ...rightCards]),
+          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title' }, [mountPath(link.left, link.left.stage)]), ...leftCards]),
+          node('div', { className: 'mount-evidence-side' }, [node('div', { className: 'mount-side-title' }, [mountPath(link.right, link.right.stage)]), ...rightCards]),
         ]),
       ]);
     }
-    const leftCards = (e.left_details || []).map(f => renderEvidenceFileCard(f, `${link.left.stage} · ${link.left.name}`, previewPane));
-    const rightCards = (e.right_details || []).map(f => renderEvidenceFileCard(f, `${link.right.stage} · ${link.right.name}`, previewPane));
-    if (idx === 0 && page === 1 && leftCards[0] && previewPane && !previewPane.dataset.initialized) {
+    const leftCards = (e.left_details || []).map(f => renderEvidenceFileCard(f, link.left.stage, previewPane));
+    const rightCards = (e.right_details || []).map(f => renderEvidenceFileCard(f, link.right.stage, previewPane));
+    if (autoPreview && idx === 0 && page === 1 && leftCards[0] && previewPane && !previewPane.dataset.initialized) {
       previewPane.dataset.initialized = '1';
       setTimeout(() => leftCards[0].click(), 30);
     }
-    const shortSha = (e.sha256 || '').slice(0, 12);
     return node('div', { className: 'mount-evidence' }, [
-      node('div', { className: 'mount-sha-header' }, [
-        node('span', { className: 'mount-sha-tag', textContent: `M2 相同附件 #${(page - 1) * 20 + idx + 1}` }),
-        node('code', { className: 'mount-sha-hash', title: `完整 SHA-256 指纹：${e.sha256}`, textContent: `SHA-256: ${shortSha}...` }),
-      ]),
+      link.methods?.includes('M1') ? node('div', { className: 'mount-evidence-label', textContent: '文件内容相同' }) : '',
       node('div', { className: 'mount-evidence-pair' }, [
         node('div', { className: 'mount-evidence-side' }, [
-          node('div', { className: 'mount-side-title', textContent: `◀ ${link.left.stage} · ${link.left.name}` }),
+          node('div', { className: 'mount-side-title' }, [mountPath(link.left, link.left.stage)]),
           ...leftCards,
         ]),
         node('div', { className: 'mount-evidence-side' }, [
-          node('div', { className: 'mount-side-title', textContent: `▶ ${link.right.stage} · ${link.right.name}` }),
+          node('div', { className: 'mount-side-title' }, [mountPath(link.right, link.right.stage)]),
           ...rightCards,
         ]),
       ]),
@@ -218,38 +201,27 @@ const mountEvidenceList = (link, box, page = 1, q = '', previewPane = null, meth
   if (data.pages > 1) {
     const prev = node('button', { className: 'secondary', type: 'button', textContent: '上一页证据', disabled: data.page <= 1 });
     const next = node('button', { className: 'secondary', type: 'button', textContent: '下一页证据', disabled: data.page >= data.pages });
-    prev.onclick = () => mountEvidenceList(link, box, data.page - 1, q, previewPane, method);
-    next.onclick = () => mountEvidenceList(link, box, data.page + 1, q, previewPane, method);
-    box.append(node('div', { className: 'mount-toolbar' }, [prev, node('span', { textContent: `第 ${data.page} / ${data.pages} 页（共 ${data.count} 组证据）` }), next]));
+    const input = node('input', { className: 'mount-page-input', type: 'number', min: '1', max: String(data.pages), step: '1', value: String(data.page), ariaLabel: '证据页码' });
+    const go = node('button', { className: 'secondary', type: 'button', textContent: '跳转' });
+    go.onclick = () => {
+      const page = validMountPage(input.value, data.pages);
+      if (page === null) return notify(`请输入 1 到 ${data.pages} 的整数页码`, true);
+      mountEvidenceList(link, box, page, q, previewPane, method, false).catch(e => notify(e.message, true));
+    };
+    input.onkeydown = event => { if (event.key === 'Enter') go.click(); };
+    prev.onclick = () => mountEvidenceList(link, box, data.page - 1, q, previewPane, method, false).catch(e => notify(e.message, true));
+    next.onclick = () => mountEvidenceList(link, box, data.page + 1, q, previewPane, method, false).catch(e => notify(e.message, true));
+    box.append(node('div', { className: 'mount-toolbar' }, [prev, node('span', { textContent: `第 ${data.page} / ${data.pages} 页（共 ${data.count} 组证据）` }), next, node('label', {}, ['跳至 ', input, ' 页']), go]));
   }
 });
 
-const mountEvidenceLoader = (link, previewPane = null, autoOpen = false) => {
-  const box = node('div');
-  const methodSelect = node('select', {}, [
-    node('option', { value: 'all', textContent: '全部方法证据' }),
-    node('option', { value: 'M1', textContent: '仅看 M1 项目代码证据' }),
-    node('option', { value: 'M2', textContent: '仅看 M2 相同附件证据' }),
-  ]);
-  const input = node('input', { type: 'search', placeholder: '筛选本关系的证据文件名、项目代码或 SHA-256...' });
-  input.oninput = () => mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value);
-  methodSelect.onchange = () => mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value);
-
-  if (autoOpen) {
-    setTimeout(() => mountEvidenceList(link, box, 1, '', previewPane, 'all').catch(e => notify(e.message, true)), 10);
-    return node('div', { className: 'mount-evidence-container' }, [
-      node('div', { className: 'mount-evidence-topbar' }, [
-        node('strong', { textContent: `🔍 关联证据文件明细（共 ${link.evidence_count} 组）` }),
-        methodSelect,
-        input,
-      ]),
-      box,
-    ]);
-  }
-
-  const wrap = node('details', {}, [node('summary', { textContent: `查看关联证据（${link.evidence_count} 组）` }), methodSelect, input, box]);
-  wrap.ontoggle = () => { if (wrap.open && !box.childElementCount) mountEvidenceList(link, box, 1, input.value, previewPane, methodSelect.value).catch(e => notify(e.message, true)); };
-  return wrap;
+const mountEvidenceLoader = (link, previewPane = null, autoPreview = false) => {
+  const box = node('div', { className: 'mount-evidence-container' });
+  setTimeout(() => mountEvidenceList(link, box, 1, '', previewPane, 'all', autoPreview).catch(e => {
+    box.textContent = `无法加载文件：${e.message}`;
+    notify(e.message, true);
+  }), 10);
+  return box;
 };
 
 let currentReviewContext = null;
@@ -292,38 +264,25 @@ const mountActionButtons = link => {
 };
 
 const mountRelation = (link, previewPane = null, autoOpen = false) => {
-  const stageClass = s => `mount-stage-pill stage-${String(s || '').toLowerCase()}`;
   const methodBadge = mountMethodLabel(link.methods);
-  const m1State = link.m1_validation ? ` · M1校验:${mountM1StateText(link.m1_validation.state)}` : '';
+  const m1State = link.m1_validation ? mountM1StateText(link.m1_validation.state) : '';
   const hasHistory = Boolean(link.confirmation?.status || link.confirmation?.history?.length);
 
   return node('div', { className: 'mount-relation-card' }, [
     node('div', { className: 'mount-relation-header' }, [
-      node('div', { className: 'mount-relation-title-area' }, [
-        node('div', { className: 'mount-relation-title' }, [
-          node('span', { className: stageClass(link.left.stage), textContent: link.left.stage }),
-          node('strong', { className: 'mount-relation-nodename', textContent: link.left.name }),
-          node('span', { className: 'mount-relation-arrow', textContent: '⇄' }),
-          node('span', { className: stageClass(link.right.stage), textContent: link.right.stage }),
-          node('strong', { className: 'mount-relation-nodename', textContent: link.right.name }),
-        ]),
-        node('span', { className: 'mount-sha-tag', textContent: methodBadge }),
-        node('span', { className: `mount-status-badge status-${link.status}`, textContent: `${mountStatusText(link.status)}${m1State}` }),
-        link.ambiguous ? node('span', { className: 'conflict-type-badge type-multi_parcel_same_code', textContent: '一对多/多对多候选' }) : '',
-        link.conflict ? node('span', { className: 'conflict-type-badge', textContent: 'M1/M2证据冲突' }) : '',
-      ]),
-      node('div', { className: 'mount-relation-header-actions' }, mountActionButtons(link)),
+      node('strong', { className: 'mount-relation-title', textContent: `${mountStageName(link.left.stage)} ↔ ${mountStageName(link.right.stage)}` }),
+      node('span', { className: 'mount-relation-method', textContent: methodBadge }),
     ]),
-    link.m1_validation?.reason ? node('p', { className: 'conflict-reasons', style: 'margin:8px 12px 0;', textContent: `校验与复核说明：${link.m1_validation.reason}` }) : '',
-    node('details', { className: 'mount-relation-folders-collapse', open: true }, [
-      node('summary', { textContent: '📁 关联双方项目大目录真实路径（点击路径可在资源管理器打开）' }),
-      node('div', { className: 'mount-relation-folders-inner' }, [
-        mountFolderNode(link.left, true),
-        mountFolderNode(link.right, true),
-      ]),
-    ]),
-    hasHistory ? node('div', { style: 'padding:0 12px;' }, [renderAuditHistory(link.confirmation)]) : '',
     mountEvidenceLoader(link, previewPane, autoOpen),
+    node('div', { className: 'mount-relation-facts' }, [
+      node('span', { className: `mount-status-badge status-${link.status}`, textContent: mountStatusText(link.status) }),
+      m1State ? node('span', { className: 'mount-relation-check', textContent: `代码核对：${m1State}` }) : '',
+      link.ambiguous ? node('span', { className: 'conflict-type-badge type-multi_parcel_same_code', textContent: '一对多/多对多候选' }) : '',
+      link.conflict ? node('span', { className: 'conflict-type-badge', textContent: '代码与文件证据冲突' }) : '',
+    ]),
+    node('div', { className: 'mount-relation-header-actions' }, mountActionButtons(link)),
+    link.m1_validation?.reason ? node('details', { className: 'mount-relation-folders-collapse' }, [node('summary', { textContent: '查看核对详情' }), node('p', { className: 'conflict-reasons', textContent: link.m1_validation.reason })]) : '',
+    hasHistory ? node('div', { style: 'padding:0 12px;' }, [renderAuditHistory(link.confirmation)]) : '',
   ]);
 };
 
@@ -339,29 +298,16 @@ const openMountReviewDialog = context => {
     const r = context.row;
     currentReviewContext = { type: 'project', id: r.id, title: r.name };
     $('#mountReviewTitle').textContent = `项目关联核对：${r.name}`;
-    $('#mountReviewSubtitle').textContent = `当前状态：${mountStatusText(r.status)} · 跨阶段候选关系 ${r.links.length} 条 · 相同附件指纹 ${r.evidence_count} 个`;
-
-    const stageSummary = node('details', { className: 'mount-dialog-stages-collapse' }, [
-      node('summary', { textContent: '📂 查看该项目已归属的各阶段业务项目大目录路径' }),
-      node('div', { className: 'mount-dialog-stages-body' },
-        Object.entries(r.stages || {}).filter(([, v]) => v?.length).map(([sid, list]) =>
-          node('div', { className: 'mount-dialog-stage-item' }, [
-            node('strong', { textContent: `${mountStageName(sid)}：` }),
-            ...list.map(f => mountFolderNode(f, true)),
-          ])
-        )
-      ),
-    ]);
+    $('#mountReviewSubtitle').textContent = `${mountStatusText(r.status)} · ${r.links.length} 条关联`;
 
     leftPane.append(
-      stageSummary,
       ...r.links.map((link, idx) => mountRelation(link, rightPane, idx === 0))
     );
   } else if (context.type === 'link') {
     const link = context.link;
     currentReviewContext = { type: 'link', id: link.id };
     $('#mountReviewTitle').textContent = `${link.left.stage} ⇄ ${link.right.stage} 跨阶段目录关系与证据核对`;
-    $('#mountReviewSubtitle').textContent = `${link.left.name} ⇄ ${link.right.name} · 来源方法：${mountMethodLabel(link.methods)} · 状态：${mountStatusText(link.status)} · 证据 ${link.evidence_count} 组`;
+    $('#mountReviewSubtitle').textContent = `${mountStatusText(link.status)} · ${link.evidence_count} 组证据`;
     leftPane.append(mountRelation(link, rightPane, true));
   }
 
@@ -405,7 +351,7 @@ const renderProjectMountTable = data => {
   const stages = mountStageConfig.filter(stage => !hiddenMountStages.has(stage.stage_id));
   const rows = data.rows || [];
   if (!rows.length) {
-    $('#mountTable').replaceChildren(node('div', {className: 'empty-state', textContent: '没有匹配的项目'}));
+    $('#mountTable').replaceChildren(node('div', {className: 'empty-state', textContent: data.scanned_at ? '没有匹配的项目' : '暂无新挂接结果，请先执行第二阶段目录挂接技能'}));
     return;
   }
   const body = rows.map(row => {
@@ -463,41 +409,62 @@ const renderProjectMountTable = data => {
 
 const renderMount = data => {
   mountData = data;
+  mountPage = data.page || 1;
   if (data.stage_config?.length) mountStageConfig = data.stage_config;
   if (!$('#mountStageToggles').children.length) {
     $('#mountStageToggles').append(node('span', {textContent: '显示阶段：'}), ...mountStageConfig.map(stage => {
       const checkbox = node('input', {type: 'checkbox', checked: true});
       checkbox.onchange = () => {
         if (checkbox.checked) hiddenMountStages.delete(stage.stage_id); else hiddenMountStages.add(stage.stage_id);
-        renderProjectMountTable(mountData);
+        if ($('#mountTable').ariaBusy !== 'true') renderProjectMountTable(mountData);
       };
       return node('label', {}, [checkbox, stage.title || stage.name]);
     }));
   }
   $('#mountPhase').textContent = `${data.phase || '已就绪'}${data.scanned_at ? ` · ${data.scanned_at.replace('T', ' ')}` : ''}`;
-  $('#mountSummary').textContent = `项目 ${data.summary.projects} · 候选关联 ${data.summary.links}`;
+  $('#mountSummary').textContent = `总项目 ${data.summary.projects} · 需要审核 ${data.summary.project_needs_review} · 未关联 ${data.summary.project_unlinked}`;
   $('#mountPage').textContent = `${data.page || 1} / ${data.pages || 1}`;
+  $('#mountPageInput').value = data.page || 1;
+  $('#mountPageInput').max = data.pages || 1;
   $('#mountPrev').disabled = (data.page || 1) <= 1;
   $('#mountNext').disabled = (data.page || 1) >= (data.pages || 1);
   renderProjectMountTable(data);
 };
 
 const loadMount = () => {
+  const request = ++mountRequest;
   $('#mountPhase').textContent = '正在读取关联结果…';
-  return api(`/api/folder-mount?view=projects&page=${mountPage}&q=${encodeURIComponent($('#mountQuery').value.trim())}`)
-    .then(renderMount).catch(error => {
+  $('#mountTable').ariaBusy = 'true';
+  $('#mountTable').replaceChildren(node('div', {className: 'mount-loading', role: 'status'}, [node('span', {className: 'spinner', ariaHidden: 'true'}), '正在加载项目…']));
+  const categories = $('#mountCategoryFilters').value;
+  return api(`/api/folder-mount?view=projects&page=${mountPage}&categories=${encodeURIComponent(categories)}&q=${encodeURIComponent($('#mountQuery').value.trim())}`)
+    .then(data => { if (request === mountRequest) renderMount(data); }).catch(error => {
+      if (request !== mountRequest) return;
       $('#mountPhase').textContent = `关联结果读取失败：${error.message}`;
+      $('#mountTable').replaceChildren(node('div', {className: 'empty-state', textContent: '项目加载失败，请重试'}));
       notify(error.message, true);
-    });
+    }).finally(() => { if (request === mountRequest) $('#mountTable').ariaBusy = 'false'; });
 };
 
 /* ==================== 事件绑定 ==================== */
 let mountQueryTimer;
+$('#mountCategoryFilters').onchange = () => {
+  mountPage = 1;
+  loadMount();
+};
 $('#mountQuery').oninput = () => {
   clearTimeout(mountQueryTimer);
   mountQueryTimer = setTimeout(() => { mountPage = 1; loadMount(); }, 300);
 };
 $('#mountPrev').onclick = () => { mountPage = Math.max(1, mountPage - 1); loadMount(); };
 $('#mountNext').onclick = () => { mountPage += 1; loadMount(); };
+$('#mountPageGo').onclick = () => {
+  const pages = mountData?.pages || 1;
+  const page = validMountPage($('#mountPageInput').value, pages);
+  if (page === null) return notify(`请输入 1 到 ${pages} 的整数页码`, true);
+  mountPage = page;
+  loadMount();
+};
+$('#mountPageInput').onkeydown = event => { if (event.key === 'Enter') $('#mountPageGo').click(); };
 $('#closeMountReview').addEventListener('click', () => $('#mountReviewDialog').close());
 loadMount();

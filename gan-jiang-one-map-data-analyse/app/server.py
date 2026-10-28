@@ -20,22 +20,27 @@ BASE=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(BASE/'scripts'))
 from review_service import JOBS,SOURCE,read_json,write_json,validate_upload,prepare_job,run_step,collect_review,resolve_review,save_choice,export_review,spatial_preview,save_judgement,save_alias,save_coordinate_system,save_georeference,save_relationship_decision
 from storage_info import storage_info
-from folder_mount import scan_folders, validate_methods, PreparationError, RULE_VERSION, identifier, project_rows
+from folder_mount import scan_folders, validate_methods, PreparationError, RULE_VERSION, project_rows
 from source_config import STAGES, STAGE_TITLES
-from project_catalog import ProjectCatalog, is_material_leaf_dir, is_pure_classification, normalize_dir_name
+from project_catalog import ProjectCatalog
 from project_codes import RULE_VERSION as M1_RULE_VERSION
+from stage2 import Stage2
+from directory_mount_store import load_directory_mounts, review_directory_mount
+from run_organized_mount import OUTPUT as MOUNT_DATA_DIR, DEFAULT_SOURCE as MOUNT_SOURCE
+from contextlib import closing
 
-def get_catalog_projects():
-    cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
-    try:
-        return [p for p in cat.projects.values() if Path(p['physical_path']).is_dir() and Path(p['physical_path']).resolve().is_relative_to(SOURCE.resolve())]
-    finally: cat.close()
+STAGE2_LOCK=threading.RLock()
+STAGE2_RUNNING=False
 
-def get_catalog_unresolved_decisions():
-    cat=ProjectCatalog(storage_dir=MOUNT_DIR,root=SOURCE)
+def stage2_scan():
+    global STAGE2_RUNNING
     try:
-        return [d for d in cat.decisions.values() if d.get('node_type')=='unresolved' or d.get('status') in ('review','unresolved')]
-    finally: cat.close()
+        with closing(Stage2()) as service:service.scan()
+    except Exception as error:
+        with closing(Stage2()) as service, service.db:
+            service.db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?,?)',(uuid.uuid4().hex,'failed',0,0,json.dumps([dict(error=str(error))],ensure_ascii=False),datetime.now().isoformat(),datetime.now().isoformat()))
+    finally:
+        with STAGE2_LOCK:STAGE2_RUNNING=False
 
 from organize_independent_documents import organize_independent_documents
 
@@ -48,6 +53,46 @@ if MOUNT_STATE['status']=='running':
 
 
 MOUNT_LAST_SAVE=0
+
+def organize_view(params=None):
+    params=params or {}
+    ledgers=sorted((BASE/'work').glob('项目边界全量复核台账_*.json'),key=lambda p:p.stat().st_mtime,reverse=True)
+    if not ledgers:
+        return dict(available=False,projects=[],count=0,page=1,pages=1,total_projects=0,issue_projects=0,stages=[])
+    ledger=read_json(ledgers[0])
+    if not isinstance(ledger,dict) or not isinstance(ledger.get('projects'),list):
+        raise ValueError('整理复核台账格式无效，无法展示结果。')
+    projects=[]
+    for p in ledger['projects']:
+        issues=list(p.get('issues') or [])
+        if p.get('errors'):issues.append('目录或材料读取异常：'+'；'.join(p['errors'][:3]))
+        evidence=[]
+        for key in ('manual_observation','initial_document_evidence','initial_ocr_evidence','ocr_sample','no_extension_sample'):
+            item=p.get(key) or {}
+            path=item.get('source') or item.get('path')
+            if path and path not in evidence:evidence.append(path)
+        for item in p.get('document_samples') or []:
+            path=item.get('path')
+            if path and path not in evidence:evidence.append(path)
+        for path in (p.get('previous_incremental_evidence') or {}).get('evidence_paths',[]):
+            if path and path not in evidence:evidence.append(path)
+        projects.append(dict(id=p.get('id',''),stage=p.get('stage',''),name=p.get('name',''),
+                             path=p.get('path',''),source=p.get('source',''),status=p.get('status','待复核'),
+                             issues=issues,parent=p.get('candidate_parent',''),evidence=evidence[:8],
+                             observation=(p.get('manual_observation') or {}).get('observation','')))
+    total=len(projects);issue_count=sum(bool(p['issues']) for p in projects)
+    stages=sorted({p['stage'] for p in projects if p['stage']})
+    query=params.get('q',[''])[0].strip().casefold()
+    stage=params.get('stage',[''])[0]
+    kind=params.get('kind',['all'])[0]
+    if kind not in ('issues','all'):raise ValueError('无效的复核筛选条件')
+    projects=[p for p in projects if (kind=='all' or p['issues']) and (not stage or p['stage']==stage)
+              and (not query or query in json.dumps(p,ensure_ascii=False).casefold())]
+    projects.sort(key=lambda p:(not any(i!='原索引标记边界复核' for i in p['issues']),not bool(p['issues']),p['stage'],p['name']))
+    size=30;count=len(projects);pages=max(1,(count+size-1)//size)
+    page=max(1,min(int(params.get('page',['1'])[0]),pages))
+    return dict(available=True,projects=projects[(page-1)*size:page*size],count=count,page=page,pages=pages,
+                total_projects=total,issue_projects=issue_count,stages=stages,created_at=ledger.get('created_at',''))
 
 def mount_update(**changes):
     global MOUNT_LAST_SAVE
@@ -78,37 +123,26 @@ def mount_scan(methods=None):
 
 
 def mount_result():
-    result=read_json(MOUNT_DIR/'result.json',dict(folders=[],links=[],errors=[]))
-    for folder in result['folders']+[f for link in result['links'] for f in (link['left'],link['right'])]:
-        folder.setdefault('id',identifier('legacy:'+folder['folder']))
-        folder.setdefault('name',Path(folder['folder']).name)
-    if not result.get('scanned_at') and (MOUNT_DIR/'inventory.json').is_file():
-        inventory=read_json(MOUNT_DIR/'inventory.json')
-        if inventory.get('rule_version')==RULE_VERSION:
-            result.update(inventory,links=[],inventory_only=True)
-    result['folders']=[folder for folder in result['folders'] if Path(folder['folder']).is_dir()
-                       and Path(folder['folder']).resolve().is_relative_to(SOURCE.resolve())
-                       and (folder.get('reason')=='人工手动指定项目大目录边界' or not is_material_leaf_dir(normalize_dir_name(folder['name'])))]
-    result['folders']=[f for f in result['folders'] if f.get('reason')=='人工手动指定项目大目录边界' or not is_pure_classification(normalize_dir_name(f['name']))]
-    for folder in result['folders']:
-        folder['paths']=[p for p in folder.get('paths',[folder['folder']]) if Path(p).is_dir() and Path(p).resolve().is_relative_to(SOURCE.resolve())]
-    allowed={folder['id'] for folder in result['folders']}
-    result['links']=[link for link in result['links'] if link['left']['id'] in allowed and link['right']['id'] in allowed]
-    if 'project_code_index' in result:
-        result['project_code_index']=[e for e in result['project_code_index'] if e['directory_id'] in allowed]
-    decisions=read_json(MOUNT_DIR/'decisions.json',{})
-    for link in result['links']:
-        link.setdefault('evidence_count',len(link.get('evidence',[])))
-        decision=decisions.get(link['id'],{})
-        same=decision.get('signature')==link['signature'] and result.get('rule_version')==RULE_VERSION
-        if decision.get('review_context'):
-            same = same and decision['review_context']==link.get('review_context')
-        elif link.get('ambiguous') or link.get('conflict') or any(f.get('reason')=='人工手动指定项目大目录边界' for f in (link['left'],link['right'])):
-            same = False
-        link['method_statuses']={method: (decision.get('status','pending') if decision.get('method_signatures',{}).get(method, decision.get('signature') if method=='M2' else None)==signature else 'pending') for method,signature in link.get('method_signatures',{'M2':link['signature']}).items()}
-        link['status']=decision.get('status',link.get('status','pending')) if same else ('review' if decision.get('status') in ('confirmed','rejected','review') else link.get('status','pending'))
-        link['confirmation']=decision
-    return result
+    with MOUNT_LOCK:
+        result=load_directory_mounts(MOUNT_DATA_DIR,MOUNT_SOURCE)
+        result['folders']=[f for f in result['folders'] if Path(f['folder']).is_dir()
+                           and Path(f['folder']).resolve().is_relative_to(MOUNT_SOURCE.resolve())]
+        allowed={f['id'] for f in result['folders']}
+        result['links']=[link for link in result['links'] if link['left']['id'] in allowed and link['right']['id'] in allowed]
+        for link in result['links']:
+            confirmation=link.get('confirmation',{})
+            if confirmation and (confirmation.get('signature')!=link['signature']
+                                 or confirmation.get('review_context')!=link.get('review_context')
+                                 or confirmation.get('rule_version')!=result.get('rule_version')):
+                link['status']='review'
+            link['method_statuses']={method:link['status'] for method in link.get('methods',['M2'])}
+        return result
+
+
+def get_mount_projects(result=None):
+    result=mount_result() if result is None else result
+    return [dict(f,id=f['id'],stage_id=f['stage'],project_name=f['name'],
+                 physical_path=f['folder'],project_root=f['folder']) for f in result['folders']]
 
 
 def mount_search(value):
@@ -133,7 +167,7 @@ def resolve_mount_path(raw_path):
             elif extracted.exists():current=extracted;break
             else:break
     resolved=current.resolve()
-    if not any(resolved.is_relative_to(root.resolve()) for root in (SOURCE,BASE)):
+    if not any(resolved.is_relative_to(root.resolve()) for root in (SOURCE,MOUNT_SOURCE,SOURCE.with_name(SOURCE.name+'_整理'),BASE)):
         raise ValueError('路径不在项目或数据源目录内。')
     if not resolved.exists():raise FileNotFoundError('路径在磁盘上不存在。')
     return resolved
@@ -221,8 +255,8 @@ def classify_link_conflicts(link, folder_map):
 def mount_conflicts(params=None):
     params = params or {}
     result = mount_result()
-    projects = get_catalog_projects()
-    unresolved_decisions = get_catalog_unresolved_decisions()
+    projects = get_mount_projects(result)
+    unresolved_decisions = []
     folder_map = {f['id']: dict(f) for f in result.get('folders', [])}
     for p in projects:
         if p['id'] in folder_map:
@@ -399,9 +433,9 @@ def mount_conflicts(params=None):
 
 
 def mount_view(params=None):
-    params=params or {}; result=mount_result(); state=dict(read_json(MOUNT_DIR/'task.json',MOUNT_STATE))
-    if state['status']=='idle' and result.get('scanned_at'):
-        state.update(status='ready',phase='已载入 Skill 扫描关联结果')
+    params=params or {}; result=mount_result()
+    state=dict(status='ready' if result.get('scanned_at') else 'idle',
+               phase='已载入第二阶段新挂接结果' if result.get('scanned_at') else '暂无新挂接结果，请先执行第二阶段目录挂接技能')
     historical=bool(result.get('scanned_at')) and (state['status']!='ready' or result.get('rule_version')!=RULE_VERSION
                or 'M1' in result.get('methods',[]) and result.get('m1_rule_version')!=M1_RULE_VERSION)
     query=params.get('q',[''])[0].casefold(); status=params.get('status',['all'])[0]; pair=params.get('pair',['all'])[0]; method=params.get('method',['all'])[0]
@@ -428,7 +462,7 @@ def mount_view(params=None):
     for group in outgoing.values():
         for link in group: chain([link])
     response=dict(status=state['status'],phase=state['phase'],processed=state.get('processed',0),total=state.get('total',0),current_stage=state.get('current_stage',''),current_archive=state.get('current_archive',''),current_member=state.get('current_member',''),
-                source_root=str(SOURCE),stage_config=[dict(stage_id=s,name=n,title=STAGE_TITLES.get(s,n)) for s,n in STAGES],projects=get_catalog_projects(),stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
+                source_root=str(MOUNT_SOURCE),data_source='directory_mounts',stage_config=[dict(stage_id=s,name=n,title=STAGE_TITLES.get(s,n)) for s,n in STAGES],projects=get_mount_projects(result),stages=result.get('stages',[]) if result.get('inventory_only') else state.get('stages',result.get('stages',[])),
                 links=[compact(e) for e in visible] if status!='unlinked' else [],unlinked=visible if status=='unlinked' else [],
                 errors=state.get('errors',result.get('errors',[])),historical=historical,scanned_at=result.get('scanned_at'),
                 summary=dict(folders=len(result['folders']),links=len(links),confirmed=sum(e['status']=='confirmed' for e in links),pending=sum(e['status']=='pending' for e in links),review=sum(e['status']=='review' for e in links),unlinked=len(unlinked),
@@ -437,12 +471,14 @@ def mount_view(params=None):
     response.update(methods=result.get('methods',['M2']),m1_statistics=result.get('m1_statistics'),skip_statistics=result.get('skip_statistics'))
     if params.get('view',[''])[0]=='projects':
         rows=project_rows(result)
+        categories=set(params.get('categories',['all'])[0].split(','))
         chosen=[row for row in rows if (status=='all' or (row['unlinked'] if status=='unlinked' else row['status']==status))
+                and ('all' in categories or 'review' in categories and row['status'] in ('pending','review') or 'unlinked' in categories and row['unlinked'])
                 and (pair=='all' or (any(row['stages'].get(stage) for stage in pair.split('-')) if status=='unlinked' or '-' not in pair else any(link['left']['stage']+'-'+link['right']['stage']==pair for link in row['links'])))
                 and query in mount_search(row)]
         pages=max(1,(len(chosen)+49)//50); page=min(requested_page,pages)
         response.update(rows=chosen[(page-1)*50:page*50],page=page,pages=pages,count=len(chosen),inventory_only=result.get('inventory_only',False))
-        response['summary'].update(projects=len(rows),project_confirmed=sum(r['status']=='confirmed' for r in rows),project_pending=sum(r['status']=='pending' for r in rows),project_review=sum(r['status']=='review' for r in rows),project_unlinked=sum(r['unlinked'] for r in rows),project_unscanned=sum(r['status']=='unscanned' for r in rows))
+        response['summary'].update(projects=len(rows),project_confirmed=sum(r['status']=='confirmed' for r in rows),project_pending=sum(r['status']=='pending' for r in rows),project_review=sum(r['status']=='review' for r in rows),project_needs_review=sum(r['status'] in ('pending','review') for r in rows),project_unlinked=sum(r['unlinked'] for r in rows),project_unscanned=sum(r['status']=='unscanned' for r in rows))
     return response
 
 
@@ -450,7 +486,7 @@ def mount_view(params=None):
 POOL=ThreadPoolExecutor(max_workers=1)
 STATS_POOL=ThreadPoolExecutor(max_workers=8)
 LOCKS={}
-PROTECTED_WORK_ENTRIES={'python_packages','jobs','folder_mount'}
+PROTECTED_WORK_ENTRIES={'python_packages','jobs','folder_mount','stage2'}
 DATAFILE_NOTES={
     'materials':'解压后的材料文件','pdfs':'收集的 PDF 原件副本','pdf_pages':'PDF 渲染出的页面图片',
     'render_manifests':'PDF 渲染清单','cross_stage_images':'跨阶段核验渲染图','cross_stage_validation':'跨阶段核验数据',
@@ -523,7 +559,7 @@ def update(job,**changes):
     state=read_json(job/'meta.json',{});state.update(changes);write_json(job/'meta.json',state)
 
 def rerun_isolated_job(ident):
-    """隔离的第二/三阶段任务重跑内部辅助函数（第一阶段 HTTP 接口已禁用）。"""
+    """隔离的任务重跑内部辅助函数。"""
     job=job_path(ident);lock=LOCKS.setdefault(ident,threading.RLock())
     with lock:
         if read_json(job/'meta.json')['status'] not in ('ready','failed'):
@@ -583,13 +619,36 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             parts=urlsplit(self.path).path.strip('/').split('/')
+            if parts==['api','organize-review']:
+                return self.json(organize_view(parse_qs(urlsplit(self.path).query)))
+            if parts[:2]==['api','stage2']:
+                params=parse_qs(urlsplit(self.path).query)
+                with STAGE2_LOCK, closing(Stage2()) as service:
+                    if parts==['api','stage2']:
+                        data=service.overview(params.get('q',[''])[0],int(params.get('page',['1'])[0]));data['running']=STAGE2_RUNNING
+                        return self.json(data)
+                    if len(parts)==4 and parts[2]=='projects':return self.json(service.project(parts[3]))
+                    if parts==['api','stage2','records']:return self.json(service.records(params.get('q',[''])[0]))
+                    if len(parts)==4 and parts[2]=='spatial':return self.json(service.spatial(parts[3]))
+                    if parts==['api','stage2','preview']:return self.file(service.preview(),True)
+                    if parts==['api','stage2','audit']:
+                        service.preview()
+                        return self.file(service.folder/'preview-audit.json',True)
+                    if len(parts)==4 and parts[2]=='source':
+                        record=service.db.execute('SELECT m.path,m.fingerprint FROM records r JOIN materials m ON r.material=m.id WHERE r.id=? AND r.active=1 AND m.active=1',(parts[3],)).fetchone()
+                        if not record:raise FileNotFoundError('材料版本已失效')
+                        from stage2 import digest
+                        path=Path(record['path']).resolve()
+                        if not path.is_relative_to(SOURCE.resolve()) or not path.is_file() or digest(path)!=record['fingerprint']:raise ValueError('原件版本已改变，请重新扫描')
+                        return self.file(path,path.suffix.lower() not in ('.pdf','.jpg','.jpeg','.png','.bmp'))
+                raise FileNotFoundError('第二阶段接口不存在')
             if parts==['api','folder-mount']:
                 with MOUNT_LOCK:return self.json(mount_view(parse_qs(urlsplit(self.path).query)))
             if parts==['api','folder-mount','conflicts']:
                 with MOUNT_LOCK:return self.json(mount_conflicts(parse_qs(urlsplit(self.path).query)))
             if parts==['api','folder-mount','projects']:
                 with MOUNT_LOCK:
-                    projs=get_catalog_projects()
+                    projs=get_mount_projects()
                     return self.json(dict(projects=projs,count=len(projs)))
             if parts==['api','folder-mount','file']:
                 params=parse_qs(urlsplit(self.path).query)
@@ -675,7 +734,7 @@ class Handler(BaseHTTPRequestHandler):
                     path=Path(source['path']).resolve()
                     if not any(path.is_relative_to(p.resolve()) for p in (BASE,SOURCE)):raise ValueError('来源不在项目或数据源目录内。')
                     return self.file(path,path.suffix.lower() not in ('.pdf','.jpg','.jpeg','.png','.bmp'))
-            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','mount.js':'mount.js','spatial.js':'spatial.js','matching.js':'matching.js'}
+            allowed={'':'index.html','index.html':'index.html','style.css':'style.css','app.js':'app.js','mount.js':'mount.js','spatial.js':'spatial.js','matching.js':'matching.js','stage2.js':'stage2.js','organize.js':'organize.js'}
             path=urlsplit(self.path).path.lstrip('/')
             if path not in allowed:raise FileNotFoundError('页面不存在。')
             return self.file(BASE/'app/static'/allowed[path])
@@ -714,6 +773,28 @@ class Handler(BaseHTTPRequestHandler):
             origin=self.headers.get('Origin')
             if origin and origin!=f'http://{self.headers.get("Host")}':return self.json({'error':'不接受其他网页发起的操作。'},403)
             parts=urlsplit(self.path).path.strip('/').split('/')
+            if parts[:2]==['api','stage2']:
+                global STAGE2_RUNNING
+                with STAGE2_LOCK, closing(Stage2()) as service:
+                    if STAGE2_RUNNING:raise ValueError('材料扫描正在运行，完成后再审核或更改项目清单')
+                    if parts==['api','stage2','init']:
+                        service.configure(BASE/'templates/test.xlsx');count=service.sync_catalog()
+                        with MOUNT_LOCK:service.sync_links(mount_result()['links'])
+                        return self.json(dict(projects=count))
+                    if parts==['api','stage2','scan']:
+                        if not service.meta('fields'):raise ValueError('请先读取模板与第一阶段项目')
+                        STAGE2_RUNNING=True;MOUNT_POOL.submit(stage2_scan)
+                        return self.json(dict(status='running'),202)
+                    if parts==['api','stage2','review']:return self.json(service.review(json.loads(self.body(65536))))
+                    if parts==['api','stage2','attach']:return self.json(service.attach(json.loads(self.body(65536))))
+                    if parts==['api','stage2','propose']:return self.json(service.propose(json.loads(self.body(65536))))
+                    if parts==['api','stage2','import']:
+                        import hashlib
+                        payload=self.body();directory=service.folder/'imports';directory.mkdir(exist_ok=True)
+                        path=directory/(hashlib.sha256(payload).hexdigest()+'.xlsx')
+                        if not path.exists():path.write_bytes(payload)
+                        return self.json(dict(rows=service.import_values(path)))
+                raise FileNotFoundError('第二阶段接口不存在')
             if parts==['api','folder-mount','open-path']:
                 payload=json.loads(self.body(65536))
                 return self.json(open_local_path(payload.get('path',''),payload.get('action','folder')))
@@ -730,18 +811,12 @@ class Handler(BaseHTTPRequestHandler):
             if parts==['api','folder-mount','decision']:
                 payload=json.loads(self.body(65536))
                 with MOUNT_LOCK:
-                    if MOUNT_STATE['status']=='running':raise ValueError('扫描完成后再确认关系。')
                     if mount_view()['historical']: raise ValueError('当前为历史结果，成功扫描后才能确认关系。')
                     link=next((x for x in mount_result()['links'] if x['id']==payload.get('id')),None)
                     if not link or link['signature']!=payload.get('signature'):raise ValueError('关联证据已变化，请刷新后重新核对。')
                     status=payload.get('status')
                     if status not in ('pending','confirmed','rejected','review'):raise ValueError('关联状态无效。')
-                    decisions=read_json(MOUNT_DIR/'decisions.json',{})
-                    previous=decisions.get(link['id'],{})
-                    history=previous.get('history',[])
-                    if previous: history=history+[{k:v for k,v in previous.items() if k!='history'}]
-                    decisions[link['id']]=dict(status=status,signature=link['signature'],review_context=link.get('review_context'),method_signatures=link.get('method_signatures',{'M2':link['signature']}),rule_version=RULE_VERSION,updated_at=datetime.now().isoformat(timespec='seconds'),actor='本机用户',history=history)
-                    write_json(MOUNT_DIR/'decisions.json',decisions)
+                    review_directory_mount(MOUNT_DATA_DIR,MOUNT_SOURCE,link['id'],payload.get('signature'),status,RULE_VERSION)
                     return self.json(mount_view())
             if parts in (['api','jobs'],['api','current']):
                 payload=self.body() if parts==['api','jobs'] else (BASE/'test_result.xlsx').read_bytes()
@@ -783,6 +858,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:self.json({'error':str(e)},500)
 
 if __name__=='__main__':
+    with closing(Stage2()) as service, service.db:
+        service.db.execute("UPDATE tasks SET status='interrupted',finished=? WHERE status='running'",(datetime.now().isoformat(),))
     JOBS.mkdir(parents=True,exist_ok=True)
     port=int(sys.argv[1]) if len(sys.argv)>1 else 8766
     print(f'Local: http://127.0.0.1:{port}',flush=True)

@@ -23,15 +23,13 @@ class BadMaterialTests(unittest.TestCase):
             job=Path(folder);write_json(job/'meta.json',dict(status='failed',error='old failure'))
             handler=SimpleNamespace(headers={},path='/api/jobs/0123456789abcdef/rerun',json=Mock())
             with patch('app.server.job_path',return_value=job),patch.object(server.POOL,'submit') as submit:
-                # 第一阶段 HTTP 接口已禁用，返回 403
+                # 第二阶段允许重试上传任务，但不得重复入队。
                 server.Handler.do_POST(handler)
-                self.assertEqual(handler.json.call_args.args[1],403)
-                # 底层隔离的辅助函数仍保留防重复入队保护
-                server.rerun_isolated_job('0123456789abcdef')
+                self.assertEqual(handler.json.call_args.args[1],202)
                 submit.assert_called_once_with(server.execute,job)
                 self.assertEqual(read_json(job/'meta.json')['status'],'queued');self.assertIsNone(read_json(job/'meta.json')['error'])
-                with self.assertRaises(ValueError):
-                    server.rerun_isolated_job('0123456789abcdef')
+                server.Handler.do_POST(handler)
+                self.assertEqual(handler.json.call_args.args[1],400)
                 self.assertEqual(submit.call_count,1)
 
     def fixture(self,root):

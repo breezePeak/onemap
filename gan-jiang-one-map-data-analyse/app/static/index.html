@@ -8,12 +8,25 @@
 </head>
 <body>
   <main>
-    <nav class="module-tabs" aria-label="三个工作阶段">
-      <button data-module="mount" class="active" aria-pressed="true">1 · 目录关联</button>
-      <button data-module="extract" aria-pressed="false">2 · 提取项目数据</button>
-      <button data-module="output" aria-pressed="false">3 · 数据制表</button>
+    <nav class="module-tabs" aria-label="四个工作步骤">
+      <button data-module="organize" class="active" aria-pressed="true">1 · 整理目录</button>
+      <button data-module="mount" aria-pressed="false">2 · 目录关联</button>
+      <button data-module="extract" aria-pressed="false">3 · 提取项目数据</button>
+      <button data-module="output" aria-pressed="false">4 · 数据制表</button>
     </nav>
-    <section id="directoryModule">
+    <section id="organizeModule" class="mount-module">
+      <header class="mount-heading"><h1>整理目录 · 人工复核</h1><span id="organizePhase" role="status">正在读取复核台账…</span></header>
+      <p class="organize-notice">先核对整理后的项目边界，再进行目录关联。以下为复核台账快照；未完成核验不代表已通过。</p>
+      <div class="mount-simple-toolbar">
+        <input id="organizeQuery" type="search" placeholder="搜索项目、路径或问题" aria-label="搜索整理项目">
+        <label>显示：<select id="organizeKind" aria-label="筛选复核项目"><option value="all">全部项目</option><option value="issues">已发现问题</option></select></label>
+        <label>阶段：<select id="organizeStage" aria-label="筛选业务阶段"><option value="">全部阶段</option></select></label>
+        <button id="organizeRefresh" class="secondary" type="button">刷新台账</button>
+      </div>
+      <div id="organizeList" class="organize-list" aria-live="polite"></div>
+      <footer class="mount-simple-footer"><span id="organizeSummary"></span><button id="organizePrev" class="secondary" type="button">上一页</button><span id="organizePage">1 / 1</span><button id="organizeNext" class="secondary" type="button">下一页</button></footer>
+    </section>
+    <section id="directoryModule" class="hidden">
       <section id="mountModule" class="mount-module">
         <header class="mount-heading">
           <h1>项目阶段关联</h1>
@@ -21,20 +34,45 @@
         </header>
         <div class="mount-simple-toolbar">
           <input id="mountQuery" type="search" placeholder="搜索项目名称或路径" aria-label="搜索项目名称或路径">
+          <label>显示项目：<select id="mountCategoryFilters" aria-label="筛选项目">
+            <option value="all">全部项目</option>
+            <option value="review">需要审核</option>
+            <option value="unlinked">未关联</option>
+            <option value="review,unlinked">需要审核或未关联</option>
+          </select></label>
           <div id="mountStageToggles" class="mount-stage-toggles" role="group" aria-label="显示阶段"></div>
         </div>
-        <p class="mount-table-hint">勾选阶段列中的候选项目，再确认关联；点击路径打开目录。</p>
+        <p class="mount-table-hint">显示第二阶段新挂接结果。勾选阶段列中的候选项目，再确认关联；点击路径打开目录。</p>
         <div id="mountTable" class="mount-table-wrap"></div>
         <footer class="mount-simple-footer">
           <span id="mountSummary"></span>
           <button id="mountPrev" class="secondary" type="button">上一页</button>
           <span id="mountPage">1 / 1</span>
           <button id="mountNext" class="secondary" type="button">下一页</button>
+          <label>跳至 <input id="mountPageInput" class="mount-page-input" type="number" min="1" step="1" value="1" aria-label="项目列表页码"> 页</label>
+          <button id="mountPageGo" class="secondary" type="button">跳转</button>
         </footer>
       </section>
     </section>
   <section id="outputModule" class="hidden"><h1>数据制表</h1><p>待下一阶段按制表要求实现。现有导出功能可在“提取项目数据”中使用。</p></section>
   <div id="extractModule" class="extract-module hidden">
+  <section id="stage2Workbench">
+    <header class="mount-heading"><h1>字段提取与数据关联</h1><span id="s2Phase" role="status">读取已保存数据</span></header>
+    <div class="mount-simple-toolbar">
+      <button id="s2Init" class="secondary">读取 test.xlsx 与第一阶段项目</button>
+      <button id="s2Scan" class="primary">检索七阶段材料</button>
+      <label class="secondary">导入已有真实项目表 <input id="s2Import" type="file" accept=".xlsx"></label>
+      <a href="/api/stage2/preview" id="s2Preview">下载69列预览</a><a href="/api/stage2/audit">预览来源审计</a>
+    </div>
+    <p>目标字段固定为五个分组。目录关联、代码、同名和附件仅提供候选；采用前请确认文书中的项目及宗地归属。模板示例行不计入项目。</p>
+    <div class="s2-layout">
+      <aside><input id="s2Query" type="search" placeholder="搜索项目或目录" aria-label="搜索业务项目"><div id="s2Projects"></div><button id="s2Prev" class="secondary">上一页</button><span id="s2Page"></span><button id="s2Next" class="secondary">下一页</button></aside>
+      <section id="s2Detail" aria-live="polite"><p>选择项目查看字段、候选值、来源及审核历史。</p></section>
+    </div>
+    <details><summary>全部材料业务记录与未归属证据</summary><input id="s2RecordQuery" type="search" aria-label="搜索业务记录" placeholder="搜索原文或文件路径"><button id="s2FindRecords" class="secondary">检索记录</button><div id="s2Records"></div></details>
+    <details><summary>解析异常与任务进度</summary><pre id="s2Errors"></pre></details>
+  </section>
+  <details><summary>原有上传任务与空间核对工具</summary>
   <section class="upload-card" id="dropZone">
     <h1>项目数据回填</h1><div class="upload-copy"><h2 id="uploadTitle">上传需要补全的 Excel</h2><p id="uploadHelp">使用当前 69 列治理模板 · .xlsx · 最大 25 MB</p></div>
     <input id="fileInput" type="file" accept=".xlsx" hidden><button id="chooseFile" class="secondary">选择 Excel</button><button id="searchBtn" class="primary" disabled>开始检索回填 →</button><button id="currentBtn" class="text-button">使用当前项目</button>
@@ -57,6 +95,7 @@
   </section>
   <details class="log-section" id="completedLogs"><summary>检索日志与后续识别任务 <span>NEEDS_LLM · NEEDS_FUZZY · CONFLICT</span></summary><p id="logDownloads" class="hidden"><a id="fullLog" href="#">下载完整日志</a>　<a id="taskQueue" href="#">下载待识别队列</a>　<a id="unassociated" class="hidden" href="#">下载未关联材料</a>　<a id="recognition" class="hidden" href="#">下载识别统计</a></p><pre id="completedLog">尚未运行</pre></details>
   <section id="governanceDownloads" class="log-section hidden"><h2>治理成果</h2><p>检索完成后可下载；补建项目与阶段材料仍需业务核对。目录组织标准和项目类型新标准尚未提供。</p><p><a id="bundle" href="#">全部治理成果 ZIP</a>　<a id="selection" href="#">选址意见书信息表</a>　<a id="new-projects" href="#">含补建项目的完整表</a>　<a id="materials" href="#">阶段材料清单</a>　<a id="vectors" href="#">附件矢量清单</a>　<a id="missing-shp" href="#">缺少 SHP 项目</a>　<a id="mapping" href="#">监管号与单元号映射</a>　<a id="resolution" href="#">整体挂接消歧</a>　<a id="cad" href="#">CAD实体清单</a>　<a id="cad-status" href="#">CAD读取状态</a>　<a id="coordinate-pending" href="#">矢量坐标待确认</a>　<a id="source-errors" href="#">来源异常清单</a></p></section>
+  </details>
   </div>
 <dialog id="managerDialog" aria-labelledby="managerTitle">
   <header class="spatial-header"><div><h2 id="managerTitle">已处理数据管理</h2><p id="managerSubtitle">程序处理产生的数据文件与任务在本机的存储目录、占用空间，可删除不需要的数据</p></div><button id="closeManager" class="secondary" autofocus>关闭 ✕</button></header>
@@ -90,5 +129,7 @@
   <script src="/spatial.js"></script>
   <script src="/matching.js"></script>
   <script src="/mount.js"></script>
+  <script src="/stage2.js"></script>
+  <script src="/organize.js"></script>
 </body>
 </html>

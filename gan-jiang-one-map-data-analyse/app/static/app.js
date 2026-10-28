@@ -336,7 +336,7 @@ $('exportBtn').onclick=async()=>{
 };
 renderStages();listJobs();
 
-// 三阶段入口只切换界面；数据处理由用户在对应阶段显式启动。
+// 工作步骤入口只切换界面；数据处理由用户在对应阶段显式启动。
 document.querySelectorAll('.module-tabs button').forEach(button=>{
   button.onclick=()=>{
     const module=button.dataset.module;
@@ -344,9 +344,11 @@ document.querySelectorAll('.module-tabs button').forEach(button=>{
       tab.classList.toggle('active',tab===button);
       tab.setAttribute('aria-pressed',String(tab===button));
     });
+    $('organizeModule').classList.toggle('hidden',module!=='organize');
     $('directoryModule').classList.toggle('hidden',module!=='mount');
     $('extractModule').classList.toggle('hidden',module!=='extract');
     $('outputModule').classList.toggle('hidden',module!=='output');
     if(module==='mount')loadMount();
+    if(module==='organize')loadOrganize();
   };
 });

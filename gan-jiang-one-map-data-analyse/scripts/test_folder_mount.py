@@ -1,8 +1,10 @@
 import hashlib
+from contextlib import closing
 import io
 import json
 from pathlib import Path
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from extract_archives import seven_zip
 from folder_mount import scan_folders, PreparationError, validate_methods, project_rows, folder_entry
 from source_config import STAGES, STAGE_DICT
 from project_catalog import ProjectCatalog
+from directory_mount_store import save_directory_mounts, load_directory_mounts
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / 'app'))
@@ -52,6 +55,10 @@ class FolderMountTests(unittest.TestCase):
         source_patch = patch.object(server, 'SOURCE', self.root)
         source_patch.start()
         self.addCleanup(source_patch.stop)
+        for name, value in (('MOUNT_SOURCE', self.root), ('MOUNT_DATA_DIR', self.base / 'mount')):
+            setting = patch.object(server, name, value)
+            setting.start()
+            self.addCleanup(setting.stop)
 
     def put(self, stage, path, value):
         target = self.root / STAGES[stage - 1][1] / path
@@ -185,56 +192,94 @@ class FolderMountTests(unittest.TestCase):
         for n in range(23):
             self.put(1, f'A/deep/{n}.pdf', str(n).encode())
             self.put(2, f'B/{n}.pdf', str(n).encode())
-        directory = self.base / 'state'
-        state = dict(status='ready', phase='完成')
-        with patch.object(server, 'MOUNT_DIR', directory), patch.object(server, 'MOUNT_STATE', state):
-            result, cache = self.scan()
-            server.write_json(directory / 'result.json', dict(result, scanned_at='test'))
-            link = result['links'][0]
-            payload = dict(id=link['id'], signature=link['signature'])
-            self.assertFalse(server.mount_view()['chains'])
-            for status in ('confirmed', 'rejected', 'pending', 'review', 'confirmed'):
-                response, code = self.api('/api/folder-mount/decision', dict(payload, status=status))
-                self.assertEqual(code, 200, response)
-                self.assertEqual(server.mount_view()['links'][0]['status'], status)
-            self.assertGreaterEqual(len(server.read_json(directory / 'decisions.json')[link['id']]['history']), 4)
-            response, code = self.api('/api/folder-mount')
-            self.assertEqual(code, 200)
-            self.assertNotIn('evidence', response['links'][0])
-            evidence, code = self.api('/api/folder-mount/links/' + link['id'] + '?page=2')
-            self.assertEqual(code, 200)
-            self.assertEqual(len(evidence['evidence']), 3)
-            evidence, _ = self.api('/api/folder-mount/links/' + link['id'] + '?q=deep%2F10.pdf')
-            self.assertEqual(evidence['count'], 1)
-            response, _ = self.api('/api/folder-mount?status=confirmed')
-            self.assertEqual(response['count'], 1)
-
-            again, _ = self.scan(cache)
-            server.write_json(directory / 'result.json', dict(again, scanned_at='again'))
+        directory = self.base / 'mount'
+        def fresh(cache=None):
+            return scan_folders(self.root, self.database, cache or {}, self.events.append,
+                                ['M2'], directory, organized=True)
+        result, cache = fresh()
+        link = result['links'][0]
+        payload = dict(id=link['id'], signature=link['signature'])
+        # 即使旧 JSON 带有冲突内容，也只能读取数据库。
+        server.write_json(directory / 'result.json', dict(folders=[], links=[]))
+        self.assertFalse(server.mount_view()['chains'])
+        for status in ('confirmed', 'rejected', 'pending', 'review', 'confirmed'):
+            response, code = self.api('/api/folder-mount/decision', dict(payload, status=status))
+            self.assertEqual(code, 200, response)
+            self.assertEqual(server.mount_view()['links'][0]['status'], status)
+        with closing(sqlite3.connect(directory / 'project_catalog.sqlite')) as db:
+            stored = db.execute('SELECT status,confirmation FROM directory_mounts').fetchone()
+            self.assertEqual(stored[0], 'confirmed')
+            self.assertEqual(len(json.loads(stored[1])['history']), 4)
+        self.assertFalse((directory / 'decisions.json').exists())
+        response, code = self.api('/api/folder-mount')
+        self.assertEqual(code, 200)
+        self.assertNotIn('evidence', response['links'][0])
+        evidence, code = self.api('/api/folder-mount/links/' + link['id'] + '?page=2')
+        self.assertEqual(code, 200)
+        self.assertEqual(len(evidence['evidence']), 3)
+        evidence, _ = self.api('/api/folder-mount/links/' + link['id'] + '?q=deep%2F10.pdf')
+        self.assertEqual(evidence['count'], 1)
+        response, _ = self.api('/api/folder-mount?status=confirmed')
+        self.assertEqual(response['count'], 1)
+        fresh(cache)
+        with patch.object(server, 'MOUNT_STATE', dict(status='failed', phase='旧任务失败')):
             self.assertEqual(server.mount_view()['summary']['confirmed'], 1)
-            with patch.object(server, 'MOUNT_STATE', dict(status='idle', phase='restart')):
-                self.assertEqual(server.mount_view()['summary']['confirmed'], 1)
-            self.put(1, 'A/deep/0.pdf', b'changed')
-            changed, _ = self.scan(cache)
-            server.write_json(directory / 'result.json', dict(changed, scanned_at='changed'))
-            self.assertEqual(server.mount_view()['links'][0]['status'], 'review')
-            _, code = self.api('/api/folder-mount/decision', dict(payload, status='confirmed'))
-            self.assertEqual(code, 400)
-
-            self.put(1, 'A/unsafe.zip', zip_bytes({'../outside.pdf': b'unsafe'}))
-            old = (directory / 'result.json').read_bytes()
-            with patch.object(server, 'SOURCE', self.root), patch.object(server, 'BASE', self.base):
-                server.mount_scan(['M2'])
-            self.assertEqual(state['status'], 'failed')
-            self.assertEqual((directory / 'result.json').read_bytes(), old)
-            self.assertTrue(server.mount_view()['historical'])
-            self.assertTrue(server.mount_view()['errors'])
+            self.assertFalse(server.mount_view()['historical'])
+        self.put(1, 'A/deep/0.pdf', b'changed')
+        fresh(cache)
+        self.assertEqual(server.mount_view()['links'][0]['status'], 'review')
+        _, code = self.api('/api/folder-mount/decision', dict(payload, status='confirmed'))
+        self.assertEqual(code, 400)
+        before = load_directory_mounts(directory, self.root)
+        with patch('folder_mount.save_directory_mounts', side_effect=RuntimeError('存库失败')):
+            with self.assertRaises(RuntimeError):
+                fresh(cache)
+        self.assertEqual(load_directory_mounts(directory, self.root), before)
 
     def test_methods_and_duplicate_submissions_rejected(self):
         for methods in ([], ['M1', 'M1'], ['M2', 'M3'], None, 'M2'):
             with self.subTest(methods=methods):
                 with self.assertRaises(ValueError):
                     validate_methods(methods)
+
+    def test_organize_review_lists_issues_and_unreviewed_without_exposing_text(self):
+        work = self.base / 'work'
+        work.mkdir()
+        ledger = {'created_at': 'test', 'projects': [
+            {'id': 'a', 'stage': STAGES[0][1], 'name': '甲', 'path': str(self.root / STAGES[0][1] / '甲'),
+             'source': str(self.root / '原始甲'), 'status': '待完成逐项目证据复核', 'issues': [],
+             'initial_ocr_evidence': {'path': str(self.root / '材料.pdf'), 'text_excerpt': '不应返回的文书正文'}},
+            {'id': 'b', 'stage': STAGES[3][1], 'name': '乙', 'path': str(self.root / STAGES[3][1] / '乙'),
+             'status': '待完成逐项目证据复核', 'issues': ['宗地编号不一致']},
+        ]}
+        (work / '项目边界全量复核台账_测试.json').write_text(json.dumps(ledger, ensure_ascii=False), encoding='utf-8')
+        with patch.object(server, 'BASE', self.base):
+            result, code = self.api('/api/organize-review')
+            self.assertEqual(code, 200)
+            self.assertEqual((result['total_projects'], result['issue_projects'], result['count']), (2, 1, 2))
+            self.assertEqual(result['projects'][0]['name'], '乙')
+            result, _ = self.api('/api/organize-review?kind=issues')
+            self.assertEqual(result['count'], 1)
+            result, _ = self.api('/api/organize-review?kind=all&q=%E7%94%B2')
+            self.assertEqual(result['count'], 1)
+            self.assertEqual(result['projects'][0]['evidence'], [str(self.root / '材料.pdf')])
+            self.assertNotIn('不应返回的文书正文', json.dumps(result, ensure_ascii=False))
+            result, _ = self.api('/api/organize-review?kind=all&stage=' + STAGES[3][1])
+            self.assertEqual(result['projects'][0]['name'], '乙')
+        with patch.object(server, 'BASE', self.base / 'empty'):
+            result, _ = self.api('/api/organize-review')
+            self.assertFalse(result['available'])
+
+    def test_open_path_allows_organized_directory_but_not_unrelated_sibling(self):
+        organized = self.root.with_name(self.root.name + '_整理')
+        organized.mkdir()
+        with patch.object(server, 'BASE', self.base / 'app-base'), patch.object(server, 'launch_explorer') as launch:
+            self.assertEqual(server.open_local_path(str(organized))['opened'], str(organized.resolve()))
+            launch.assert_called_once()
+            unrelated = self.base / 'unrelated'
+            unrelated.mkdir()
+            with self.assertRaises(ValueError):
+                server.open_local_path(str(unrelated))
 
     def test_project_nodes_skip_classification_year_and_attachment_directories(self):
         path = self.put(4, '出让/04出让档案整理/2023年/2023-9 中宝/06 测量/附件/a.pdf', b'x')
@@ -247,6 +292,78 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(entry['name'], '幸福河项目')
         self.assertTrue(Path(entry['folder']).is_relative_to(self.root))
         self.assertNotIn('work', Path(entry['folder']).relative_to(self.root).parts)
+
+    def test_organized_mount_uses_direct_project_boundaries_and_excludes_pending(self):
+        self.put(1, 'PDF/2022-00018 内部材料/a.pdf', b'shared')
+        self.put(4, '项目乙/材料/a.pdf', b'shared')
+        self.put(1, '_待归属资料/项目丙/a.pdf', b'shared')
+        archive = self.put(1, 'PDF/原始.zip', zip_bytes({'file.pdf': b'archive'}))
+        (self.root / '整理项目索引.json').write_text(json.dumps({'projects': {'x': {
+            'stage': STAGES[0][1], 'name': 'PDF', 'boundary_review': True, 'reason': '需核对'}}}), encoding='utf-8')
+        result, _ = scan_folders(self.root, self.database, {}, self.events.append,
+                                 ['M2'], self.base / 'mount', organized=True)
+        self.assertEqual({f['name'] for f in result['folders']}, {'PDF', '项目乙'})
+        self.assertEqual(len(result['links']), 1)
+        self.assertTrue(next(f for f in result['folders'] if f['name'] == 'PDF')['boundary_review'])
+        self.assertFalse(Path(str(archive) + '.解压').exists())
+        self.assertFalse(any('_待归属资料' in m['path'] for m in result['materials']))
+        catalog = ProjectCatalog(storage_dir=self.base / 'mount', root=self.root)
+        self.assertEqual({p['project_name'] for p in catalog.projects.values()}, {'PDF', '项目乙'})
+        catalog.close()
+
+    def test_organized_mount_runner_writes_separate_result(self):
+        from run_organized_mount import run
+        self.put(1, '甲/a.pdf', b'shared')
+        self.put(4, '乙/a.pdf', b'shared')
+        result = run(self.root, ['M2'], self.base / 'organized-result')
+        self.assertEqual(len(result['links']), 1)
+        self.assertTrue((self.base / 'organized-result/result.json').is_file())
+        self.assertFalse((self.base / 'mount/result.json').exists())
+        with closing(sqlite3.connect(self.base / 'organized-result/project_catalog.sqlite')) as db:
+            rows = db.execute('SELECT id,payload FROM directory_mounts WHERE active=1').fetchall()
+            self.assertEqual([row[0] for row in rows], [link['id'] for link in result['links']])
+            self.assertEqual(json.loads(rows[0][1]), result['links'][0])
+
+    def test_numbered_supply_materials_remain_in_their_project_after_reload(self):
+        parent = '划拨/01划拨档案整理/2023/2023-02412 中医药国际生态科技城一期项目——白马路二期'
+        names = ('02.宗地图', '03.报批示意图', '04.测量报告', '05.界址点成果表',
+                 '06.示意图', '07.红线图', '08.征求意见图', '09.用地划拨手续报告抄告单', '10.备案通知书')
+        for name in names:
+            self.put(4, f'{parent}/{name}/材料.pdf', b'x')
+        storage = self.base / 'mount'
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        for name in names:
+            self.assertEqual(catalog.register_or_find('S4', f'{parent}/{name}/材料.pdf', False)['project_root'], parent)
+        stale = dict(next(iter(catalog.projects.values())), id='stale', project_root=f'{parent}/06.示意图', project_name='06.示意图')
+        catalog.upsert_db(stale)
+        catalog.close()
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        self.assertNotIn('stale', catalog.projects)
+        self.assertEqual(catalog.register_or_find('S4', f'{parent}/06.示意图/材料.pdf', False)['project_root'], parent)
+        catalog.close()
+
+    def test_agent_recognizes_whole_supply_project_from_material_structure(self):
+        parent = '划拨/01划拨档案整理/2022/2022-00018 国家级技能人才培养综合园区公共配套一期工程——育匠路'
+        names = ('报批示意图', '测量报告', '成果资料', '国有建设用地划拨决定书',
+                 '国有建设用地交地确认书', '红线图', '界址点成果表', '其他',
+                 '使用林地审核同意书', '示意图', '宗地图')
+        for name in names:
+            self.put(4, f'{parent}/{name}/材料.pdf', b'x')
+        self.put(4, f'{parent}/面积.xlsx', b'x')
+        storage = self.base / 'mount'
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        catalog.apply_agent_decisions([{
+            'stage_id': 'S4', 'rel_path': parent, 'node_type': 'project',
+            'reason': '同一工程目录内的测量、划拨、交地及图件共同构成项目资料',
+            'evidence_paths': [f'{parent}/测量报告', f'{parent}/国有建设用地划拨决定书', f'{parent}/面积.xlsx'],
+        }])
+        catalog.close()
+        catalog = ProjectCatalog(storage_dir=storage, root=self.root)
+        for name in names:
+            project = catalog.register_or_find('S4', f'{parent}/{name}/材料.pdf', False)
+            self.assertEqual(project['project_root'], parent)
+            self.assertEqual(project['decision_source'], 'agent')
+        catalog.close()
 
     def test_shared_project_candidates_are_kept_separate_in_stage_cells(self):
         self.put(1, '项目甲/a.pdf', b'shared')
@@ -288,7 +405,7 @@ class FolderMountTests(unittest.TestCase):
         result['folders'].extend([stale, file_node])
         result['links'].append(dict(link, id='stale-link', left=stale))
         with patch.object(server, 'MOUNT_DIR', self.base / 'mount'):
-            server.write_json(self.base / 'mount/result.json', result)
+            save_directory_mounts(self.base / 'mount', self.root, result['links'], scan=result)
             visible = server.mount_result()
         self.assertFalse({'stale', 'file'} & {f['id'] for f in visible['folders']})
         self.assertNotIn('stale-link', {e['id'] for e in visible['links']})
@@ -316,7 +433,7 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(len(projects), 7)
         self.assertEqual(len(result['links']), 21)
         with patch.object(server, 'MOUNT_DIR', self.base / 'mount'):
-            server.write_json(self.base / 'mount/result.json', dict(result, scanned_at='test'))
+            save_directory_mounts(self.base / 'mount', self.root, result['links'], scan=result)
             visible = server.mount_result()
         self.assertEqual(len(visible['links']), 21)
         self.assertTrue(all(Path(f['folder']).is_dir() for f in visible['folders']))
@@ -331,40 +448,26 @@ class FolderMountTests(unittest.TestCase):
         folder = next(f for f in result['folders'] if f['id'] == material['business_directory_id'])
         self.assertEqual(folder['kind'], 'ungrouped')
 
-    def test_m2_successful_history_survives_obsolete_inventory(self):
+    def test_old_results_and_decisions_never_populate_empty_new_page(self):
         self.put(1, '项目甲/a.pdf', b'shared')
         self.put(7, '项目乙/a.pdf', b'shared')
         result, _ = self.scan()
-        result.update(rule_version='previous-seven-stage-rule', scanned_at='previous-success')
-        link = result['links'][0]
         storage = self.base / 'mount'
-        decisions = {link['id']: dict(status='confirmed', signature=link['signature'], history=[{'status':'pending'}])}
-        with patch.object(server, 'MOUNT_DIR', storage), patch.object(server, 'MOUNT_STATE', dict(status='ready', phase='完成')):
-            server.write_json(storage / 'result.json', result)
-            server.write_json(storage / 'inventory.json', dict(folders=[], stages=[{'stage_id':'S1'}], errors=[], rule_version='old-four-stage'))
-            server.write_json(storage / 'decisions.json', decisions)
-            view = server.mount_view()
-            loaded = server.mount_result()
-        self.assertEqual(len(loaded['links']), 1)
-        self.assertEqual(len(loaded['stages']), 7)
-        self.assertTrue(view['historical'])
-        self.assertEqual(loaded['links'][0]['status'], 'review')
-        self.assertEqual(loaded['links'][0]['confirmation'], decisions[link['id']])
-        self.assertEqual(server.read_json(storage / 'decisions.json'), decisions)
-
-    def test_m2_inventory_fallback_requires_current_rule_and_no_success(self):
-        self.put(1, '项目甲/a.pdf', b'one')
-        result, _ = self.scan()
-        storage = self.base / 'mount'
-        with patch.object(server, 'MOUNT_DIR', storage):
-            inventory = {k:result[k] for k in ('folders', 'stages', 'errors', 'rule_version', 'methods')}
-            server.write_json(storage / 'inventory.json', inventory)
-            loaded = server.mount_result()
-            self.assertTrue(loaded.get('inventory_only'))
-            self.assertEqual(loaded['folders'], result['folders'])
-            inventory['rule_version'] = 'old-four-stage'
-            server.write_json(storage / 'inventory.json', inventory)
-            self.assertEqual(server.mount_result()['folders'], [])
+        server.write_json(storage / 'result.json', dict(result, scanned_at='old-success'))
+        server.write_json(storage / 'inventory.json', result)
+        server.write_json(storage / 'decisions.json', {result['links'][0]['id']: dict(status='confirmed')})
+        view = server.mount_view({'view': ['projects']})
+        self.assertEqual(view['rows'], [])
+        self.assertEqual(view['summary']['links'], 0)
+        self.assertEqual(view['projects'], [])
+        self.assertEqual(view['status'], 'idle')
+        self.assertEqual(view['data_source'], 'directory_mounts')
+        _, code = self.api('/api/folder-mount/decision', dict(id=result['links'][0]['id'], signature=result['links'][0]['signature'], status='confirmed'))
+        self.assertEqual(code, 400)
+        projects, code = self.api('/api/folder-mount/projects')
+        self.assertEqual(projects['count'], 0)
+        conflicts, code = self.api('/api/folder-mount/conflicts')
+        self.assertEqual(conflicts['items'], [])
 
     def test_database_priority_cache_avoids_repeated_analysis(self):
         storage = self.base / 'cache_test_mount'
@@ -563,7 +666,7 @@ class FolderMountTests(unittest.TestCase):
         self.assertEqual(scan_res['links'][0]['right']['name'], '人工锁定规划项目A')
 
     def test_stage1_api_isolation_and_conflicts_and_agent_gate(self):
-        """三阶段入口共存，目录扫描仍由 Agent 执行，保留冲突审核与 Agent 门禁。"""
+        """四个工作步骤入口共存，目录扫描仍由 Agent 执行，保留冲突审核与 Agent 门禁。"""
         # 1. 构造含多项目批次目录的数据集，验证未做 Agent 研判时 find_pending_complex_directories 能检出
         self.put(3, '2024年第三批次/子项目1/材料1.pdf', b'batch-1')
         self.put(3, '2024年第三批次/子项目2/材料2.pdf', b'batch-2')
@@ -590,7 +693,7 @@ class FolderMountTests(unittest.TestCase):
         state = dict(status='ready', phase='完成')
         with patch.multiple(server, SOURCE=self.root, BASE=self.base, MOUNT_DIR=mount_dir, MOUNT_STATE=state):
             result, _ = self.scan()
-            server.write_json(mount_dir / 'result.json', dict(result, scanned_at='2026-10-26T15:30:00'))
+            save_directory_mounts(mount_dir, self.root, result['links'], scan=result)
             conflicts_data, status = self.api('/api/folder-mount/conflicts')
             self.assertEqual(status, 200)
             self.assertGreaterEqual(conflicts_data['counts']['shared_attachment'], 2)
@@ -613,7 +716,7 @@ class FolderMountTests(unittest.TestCase):
         self.put(2, '项目乙/附件.txt', b'shared')
         result, _ = self.scan()
         mount_dir = self.base / 'mount'
-        server.write_json(mount_dir / 'result.json', dict(result, scanned_at='2026-10-26T18:09:51'))
+        save_directory_mounts(mount_dir, self.root, result['links'], scan=result)
         server.write_json(mount_dir / 'task.json', dict(status='ready', phase='技能执行完成'))
         with (patch.multiple(server, MOUNT_DIR=mount_dir, MOUNT_STATE=dict(status='failed', phase='旧失败状态')),
               patch.object(ProjectCatalog, 'ensure_agent_decisions_applied', side_effect=AssertionError('读取页面不应重新入库'))):

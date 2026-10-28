@@ -1,0 +1,633 @@
+{
+  "template": "F:\\lin_shi_project\\onemap\\gan-jiang-one-map-data-analyse\\templates\\test.xlsx",
+  "sha256": "714db1b63b9bd5d0c6b01a8ec55aeb5aa7fa5186a9be499d120db8da4093835c",
+  "sheet": "Sheet1",
+  "header_row": 2,
+  "columns": 69,
+  "example_rows_excluded": [
+    3
+  ],
+  "fields": [
+    {
+      "code": "A",
+      "column": 1,
+      "name": "方式",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "B",
+      "column": 2,
+      "name": "文件名序号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "C",
+      "column": 3,
+      "name": "提交项目文件名",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "D",
+      "column": 4,
+      "name": "数据治理文件名",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "E",
+      "column": 5,
+      "name": "规划号",
+      "group": "原始标识",
+      "required": false,
+      "format": "@",
+      "type": "string"
+    },
+    {
+      "code": "F",
+      "column": 6,
+      "name": "不动产测量报告项目名称",
+      "group": "原始标识",
+      "required": false,
+      "format": "@",
+      "type": "string"
+    },
+    {
+      "code": "G",
+      "column": 7,
+      "name": "项目建议书立项批复\n建设项目名称",
+      "group": "原始标识",
+      "required": false,
+      "format": "@",
+      "type": "string"
+    },
+    {
+      "code": "H",
+      "column": 8,
+      "name": "划拨决定书\n建设项目名称",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "I",
+      "column": 9,
+      "name": "地块名称",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "J",
+      "column": 10,
+      "name": "供地矢量\n项目名称字段信息",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "K",
+      "column": 11,
+      "name": "供地矢量\n批复文号字段信息",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "L",
+      "column": 12,
+      "name": "坐落",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "M",
+      "column": 13,
+      "name": "不动产业务号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "N",
+      "column": 14,
+      "name": "宗地代码",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "O",
+      "column": 15,
+      "name": "不动产单元号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "P",
+      "column": 16,
+      "name": "无效1",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "Q",
+      "column": 17,
+      "name": "无效2",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "R",
+      "column": 18,
+      "name": "划拨决定书/出让合同\n电子监管号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "S",
+      "column": 19,
+      "name": "划拨决定书/出让合同\n合同编号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "T",
+      "column": 20,
+      "name": "宗地编号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "U",
+      "column": 21,
+      "name": "土地供应宗地代码（地块编号）",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "V",
+      "column": 22,
+      "name": "用地规划设计条件",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "W",
+      "column": 23,
+      "name": "公告号",
+      "group": "原始标识",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "X",
+      "column": 24,
+      "name": "项目名称",
+      "group": "项目信息",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "Y",
+      "column": 25,
+      "name": "项目代码",
+      "group": "项目信息",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "Z",
+      "column": 26,
+      "name": "建设单位",
+      "group": "项目信息",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AA",
+      "column": 27,
+      "name": "项目类型\n（必填）",
+      "group": "项目信息",
+      "required": true,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AB",
+      "column": 28,
+      "name": "第一位特征码",
+      "group": "项目信息",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AC",
+      "column": 29,
+      "name": "第二位特征码",
+      "group": "项目信息",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AD",
+      "column": 30,
+      "name": "建设地点",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AE",
+      "column": 31,
+      "name": "拟用地面积（源）",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AF",
+      "column": 32,
+      "name": "拟用地面积",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "number"
+    },
+    {
+      "code": "AG",
+      "column": 33,
+      "name": "项目规模及内容",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AH",
+      "column": 34,
+      "name": "项目建设依据",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AI",
+      "column": 35,
+      "name": "证书文号",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AJ",
+      "column": 36,
+      "name": "发证日期",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "date"
+    },
+    {
+      "code": "AK",
+      "column": 37,
+      "name": "面积单位",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AL",
+      "column": 38,
+      "name": "是否完成征转",
+      "group": "用地预审与选址",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AM",
+      "column": 39,
+      "name": "地块编码",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "@",
+      "type": "string"
+    },
+    {
+      "code": "AN",
+      "column": 40,
+      "name": "用地面积",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "number"
+    },
+    {
+      "code": "AO",
+      "column": 41,
+      "name": "用地性质",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AP",
+      "column": 42,
+      "name": "用地位置",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AQ",
+      "column": 43,
+      "name": "出具编号",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AR",
+      "column": 44,
+      "name": "出具日期",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "mm-dd-yy",
+      "type": "date"
+    },
+    {
+      "code": "AS",
+      "column": 45,
+      "name": "出具依据",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AT",
+      "column": 46,
+      "name": "面积单位",
+      "group": "规划条件与用地红线出具",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AU",
+      "column": 47,
+      "name": "土地用途",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AV",
+      "column": 48,
+      "name": "用地面积",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "number"
+    },
+    {
+      "code": "AW",
+      "column": 49,
+      "name": "征收面积",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "number"
+    },
+    {
+      "code": "AX",
+      "column": 50,
+      "name": "是否完成征转",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "AY",
+      "column": 51,
+      "name": "报批日期",
+      "group": "用地报批",
+      "required": false,
+      "format": "@",
+      "type": "date"
+    },
+    {
+      "code": "AZ",
+      "column": 52,
+      "name": "批复文号（必填）",
+      "group": "用地报批",
+      "required": true,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BA",
+      "column": 53,
+      "name": "批复日期（必填）",
+      "group": "用地报批",
+      "required": true,
+      "format": "General",
+      "type": "date"
+    },
+    {
+      "code": "BB",
+      "column": 54,
+      "name": "用地面积单位",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BC",
+      "column": 55,
+      "name": "征收面积单位",
+      "group": "用地报批",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BD",
+      "column": 56,
+      "name": "土地受让人",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BE",
+      "column": 57,
+      "name": "土地用途（源版）",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BF",
+      "column": 58,
+      "name": "土地用途",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BG",
+      "column": 59,
+      "name": "建设位置",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BH",
+      "column": 60,
+      "name": "供地面积（平方米）（源数据）",
+      "group": "土地供应",
+      "required": false,
+      "format": "0.00_ ",
+      "type": "number"
+    },
+    {
+      "code": "BI",
+      "column": 61,
+      "name": "供地面积",
+      "group": "土地供应",
+      "required": false,
+      "format": "0.00_ ",
+      "type": "number"
+    },
+    {
+      "code": "BJ",
+      "column": 62,
+      "name": "面积单位",
+      "group": "土地供应",
+      "required": false,
+      "format": "0.00_ ",
+      "type": "string"
+    },
+    {
+      "code": "BK",
+      "column": 63,
+      "name": "供地方式",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BL",
+      "column": 64,
+      "name": "是否完成征转",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BM",
+      "column": 65,
+      "name": "用地划拨/出让方案批复文号",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BN",
+      "column": 66,
+      "name": "土地权属来源",
+      "group": "土地供应",
+      "required": false,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BO",
+      "column": 67,
+      "name": "划拨决定书/出让合同编号\n（必填）",
+      "group": "土地供应",
+      "required": true,
+      "format": "General",
+      "type": "string"
+    },
+    {
+      "code": "BP",
+      "column": 68,
+      "name": "划拨决定书/出让合同日期",
+      "group": "土地供应",
+      "required": false,
+      "format": "@",
+      "type": "date"
+    },
+    {
+      "code": "BQ",
+      "column": 69,
+      "name": "供地单位",
+      "group": "土地供应",
+      "required": false,
+      "format": "@",
+      "type": "string"
+    }
+  ]
+}

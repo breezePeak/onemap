@@ -12,6 +12,7 @@ from inspect_sources import extracted_files, is_office_lock
 from link_stages import digest
 from source_config import STAGES, EXCLUDED_DIRECTORIES
 from project_catalog import ProjectCatalog, normalize_dir_name
+from directory_mount_store import save_directory_mounts
 from project_codes import build_code_index, RULE_VERSION as M1_RULE_VERSION
 
 RULE_VERSION = 'M2-project-seven-stage-catalog-v3-project-boundaries'
@@ -139,7 +140,7 @@ def material_detail(entry):
     return {key: entry[key] for key in ('id', 'logical_path', 'physical_path', 'archive_chain', 'validation', 'small_dir')}
 
 
-def scan_folders(root, database, cache, progress, methods=None, storage_dir=None, tolerate_corrupted=False):
+def scan_folders(root, database, cache, progress, methods=None, storage_dir=None, tolerate_corrupted=False, organized=False):
     methods = ['M2'] if methods is None else methods
     validate_methods(methods)
     root = Path(root).resolve(); database = Path(database)
@@ -150,6 +151,30 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
     entries = []; errors = []; folders = {}; summaries = []; queue = deque(); processed = set(); active = set(); archive_versions = {}
     records = ArchiveRecords(database.parent, root=root)
     summary = None
+    organized_index = {}
+    if organized and (root / '整理项目索引.json').is_file():
+        index = json.loads((root / '整理项目索引.json').read_text(encoding='utf-8'))
+        organized_index = {(p['stage'], p['name']): p for p in index.get('projects', {}).values()}
+
+    def organized_entry(path, stage_id, stage_name):
+        parts = path.relative_to(root / stage_name).parts
+        project = root / stage_name / parts[0]
+        ident = identifier(stage_id + ':' + parts[0])
+        if ident not in catalog.projects:
+            info = organized_index.get((stage_name, parts[0]), {})
+            review = bool(info.get('boundary_review'))
+            proj = dict(id=ident, stage_id=stage_id, stage_name=stage_name, project_root=parts[0],
+                        project_name=parts[0], physical_path=str(project), depth=1,
+                        reason='整理目录中的项目文件夹', confidence='high', status='review' if review else 'confirmed', files=0,
+                        updated_at='', node_type='project', decision_source='organized', evidence_paths=[],
+                        structure_version='', boundary_review=review,
+                        boundary_review_reason=info.get('reason', '') if review else '')
+            catalog.projects[ident] = proj
+            catalog.upsert_db(proj)
+        return dict(path=str(path), source=str(path), folder=str(project), stage=stage_id,
+                    business_directory_id=ident, name=parts[0], kind='project', paths=[str(project)],
+                    small_dir='/'.join(parts[:-1]), reason='整理目录中的项目文件夹', confidence='high',
+                    decision_source='organized', boundary_review=bool(catalog.projects[ident].get('boundary_review')))
 
     def report(phase, archive='', member='', done=0, total=0, stage=None):
         current_sid = stage or (summary['stage_id'] if summary else '')
@@ -184,7 +209,8 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
         summary['failed'] += 1
 
     try:
-        catalog.ensure_agent_decisions_applied()
+        if not organized:
+            catalog.ensure_agent_decisions_applied()
         # 第一步：扫描 7 个阶段目录
         for stage_id, name in STAGES:
             summary = dict(stage_id=stage_id, name=name, business_directories=0, archives=0, reused=0, extracted=0, failed=0, valid_materials=0, skipped={})
@@ -204,29 +230,33 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                 # 排除非业务目录或已有解压目录直接遍历
                 for child in dirs[:]:
                     path = base / child
-                    if child in EXCLUDED_DIRECTORIES:
+                    if organized and base == branch and child == '_待归属资料':
+                        dirs.remove(child)
+                    elif child in EXCLUDED_DIRECTORIES and not organized:
                         dirs.remove(child)
                     elif disk_path(path).is_symlink() or disk_path(path).is_junction():
                         error(path, '跳过链接目录，无法保证材料完整', summary)
                         dirs.remove(child)
-                    elif child.endswith('.解压'):
+                    elif child.endswith('.解压') and not organized:
                         dirs.remove(child)
                     else:
-                        entry = folder_entry(path / '__node__', str(path / '__node__'), root, catalog)
+                        entry = organized_entry(path / '__node__', stage_id, name) if organized else folder_entry(path / '__node__', str(path / '__node__'), root, catalog)
                         add_folder(entry)
 
                 for filename in sorted(names):
                     path = base / filename
+                    if organized and base == branch:
+                        continue
                     if is_office_lock(path):
                         continue
                     if disk_path(path).is_symlink() or not path.resolve().is_relative_to(root):
                         error(path, '文件链接超出安全扫描范围', summary)
                         continue
-                    if path.suffix.lower() in ARCHIVES:
+                    if path.suffix.lower() in ARCHIVES and not organized:
                         # 压缩包独立入队，先就地解压，待内部目录结构清晰后再判定边界
                         queue.append((path, summary, str(path), 0))
                     else:
-                        entry = folder_entry(path, str(path), root, catalog)
+                        entry = organized_entry(path, stage_id, name) if organized else folder_entry(path, str(path), root, catalog)
                         add_folder(entry)
                         entries.append(entry)
 
@@ -271,7 +301,7 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
                 error(source, value, summary)
 
         # 第三步：统一 SQLite 覆盖实体路径，防止解压文件与原包重复计数
-        indexed = extracted_files(database, root, active=active)
+        indexed = [] if organized else extracted_files(database, root, active=active)
         by_path = {str(Path(e['path']).resolve()): e for e in entries}
         indexed_entries = {}
         for record in indexed:
@@ -514,6 +544,8 @@ def scan_folders(root, database, cache, progress, methods=None, storage_dir=None
             catalog.db.execute('INSERT OR IGNORE INTO relation_snapshots (id,signature,payload) VALUES (?,?,?)',
                 (link['id'], link['signature'], json.dumps(link, ensure_ascii=False, sort_keys=True)))
         catalog.db.commit()
+        if organized:
+            save_directory_mounts(catalog.storage_dir, root, result['links'], scan=result)
         report('完成', done=len(materials), total=len(materials))
         return result, updated
     finally:

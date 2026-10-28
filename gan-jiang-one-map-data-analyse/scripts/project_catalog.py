@@ -43,7 +43,8 @@ MATERIAL_SUBDIR_NAMES = {
     '附件', '扫描件', '报件', '报批材料', '材料', '矢量', '红线', '图件',
     '06 测量', '测量', '初审意见', '成果表',
     '省厅', '耕占', '规费', '听证', '听证社保', 'PDF0906', 'PDF新',
-    '回复函', '宗地图', '成果资料', '测量报告', '界址点成果表', '示意图',
+    '回复函', '宗地图', '成果资料', '测量报告', '界址点成果表', '示意图', '报批示意图',
+    '征求意见图', '用地划拨手续报告抄告单', '用地划拨手续报告', '划拨手续报告', '抄告单', '备案通知书',
     '交地确认书', '流程附件', '供地批复', '用地批复', '组卷材料', '上会材料',
     '其他材料', '其他文件', '呈批件',
     '1项目红线与权属', '2公告文件和稳评报告', '3组卷材料', '4用地批复',
@@ -107,6 +108,9 @@ def is_material_leaf_dir(name):
         return True
     if has_explicit_project_code_or_number(cleaned):
         return False
+    unnumbered = re.sub(r'^\d{1,2}[.、_\-\s]+', '', cleaned).strip()
+    if unnumbered in MATERIAL_SUBDIR_NAMES:
+        return True
     if any(k in cleaned for k in ('申请表', '情况说明', '设计方案', '红线图', '四址范围', '证明文件', '宗地面积测量', '线面文件')):
         return True
     if re.fullmatch(r'\d{1,2}\s*测量.*', cleaned):
@@ -549,9 +553,9 @@ class ProjectCatalog:
             dec = self.decisions.get(dec_id)
             if dec and dec['node_type'] != 'project':
                 continue
-            if not dec and (is_pure_classification(leaf_name) or is_material_leaf_dir(leaf_name)):
+            if not dec and p.get('decision_source') != 'organized' and (is_pure_classification(leaf_name) or is_material_leaf_dir(leaf_name)):
                 continue
-            if p.get('decision_source') not in ('agent', 'manual') and self._is_multi_project_container_on_disk(p['stage_id'], norm_parts):
+            if p.get('decision_source') not in ('agent', 'manual', 'organized') and self._is_multi_project_container_on_disk(p['stage_id'], norm_parts):
                 continue
             filtered[key] = p
 
@@ -564,7 +568,7 @@ class ProjectCatalog:
         to_remove = set()
         for sid, items in by_stage.items():
             for parts_a, proj_a in items:
-                if proj_a.get('status') == 'manual' or proj_a.get('decision_source') == 'agent':
+                if proj_a.get('status') == 'manual' or proj_a.get('decision_source') in ('agent', 'organized'):
                     continue
                 for parts_b, proj_b in items:
                     if len(parts_b) > len(parts_a) and parts_b[:len(parts_a)] == parts_a:
@@ -607,7 +611,7 @@ class ProjectCatalog:
                 dec = self.decisions.get(dec_id)
                 if dec and dec['node_type'] != 'project':
                     continue
-                if not dec and (is_pure_classification(leaf_name) or is_material_leaf_dir(leaf_name)):
+                if not dec and proj.get('decision_source') != 'organized' and (is_pure_classification(leaf_name) or is_material_leaf_dir(leaf_name)):
                     continue
             sid = proj['stage_id']
             if sid not in self.stage_prefixes:

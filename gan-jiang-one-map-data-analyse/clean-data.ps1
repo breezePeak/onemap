@@ -49,7 +49,7 @@ try {
             throw "Expected a local data directory: $container"
         }
         $targets+=@(Get-ChildItem -LiteralPath $container -Force | Where-Object {
-            $name -ne 'work' -or $_.Name -notin @('python_packages','cad_runtime')
+            $name -ne 'work' -or $_.Name -notin @('python_packages','cad_runtime','stage2')
         } | ForEach-Object { Assert-LocalPath $_.FullName })
     }
     $cache=Assert-LocalPath (Join-Path $projectRoot 'cache_reuse.json')

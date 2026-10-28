@@ -24,6 +24,7 @@ class CleanDataTests(unittest.TestCase):
         self.put('work/pdf_pages/a.png')
         self.put('work/python_packages/keep.txt')
         self.put('work/cad_runtime/keep.exe')
+        self.put('work/stage2/business.sqlite','manual business decisions')
         self.put('outputs/export.xlsx')
         self.put('解压材料/解压记录.sqlite')
         self.put('cache_reuse.json')
@@ -53,7 +54,8 @@ class CleanDataTests(unittest.TestCase):
         for _ in range(2):
             result = self.run_clean()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual({p.name for p in (self.project / 'work').iterdir()}, {'python_packages', 'cad_runtime'})
+        self.assertEqual({p.name for p in (self.project / 'work').iterdir()}, {'python_packages', 'cad_runtime','stage2'})
+        self.assertEqual((self.project/'work/stage2/business.sqlite').read_text(),'manual business decisions')
         for folder in ('outputs', '解压材料'):
             self.assertEqual(list((self.project / folder).iterdir()), [])
         self.assertFalse((self.project / 'cache_reuse.json').exists())
