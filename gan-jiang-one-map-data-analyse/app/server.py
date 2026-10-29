@@ -58,7 +58,7 @@ def organize_view(params=None):
     params=params or {}
     ledgers=sorted((BASE/'work').glob('项目边界全量复核台账_*.json'),key=lambda p:p.stat().st_mtime,reverse=True)
     if not ledgers:
-        return dict(available=False,projects=[],count=0,page=1,pages=1,total_projects=0,issue_projects=0,stages=[])
+        return dict(available=False,projects=[],count=0,page=1,pages=1,total_projects=0,issue_projects=0,stages=[],summary_table=dict(rows=[],totals=dict(stage='合计',total=0,score_100=0,score_60=0,score_40=0,score_0=0,unscored=0)))
     ledger=read_json(ledgers[0])
     if not isinstance(ledger,dict) or not isinstance(ledger.get('projects'),list):
         raise ValueError('整理复核台账格式无效，无法展示结果。')
@@ -76,23 +76,67 @@ def organize_view(params=None):
             if path and path not in evidence:evidence.append(path)
         for path in (p.get('previous_incremental_evidence') or {}).get('evidence_paths',[]):
             if path and path not in evidence:evidence.append(path)
+        confidence=p.get('boundary_confidence') or {}
+        score=confidence.get('score')
+        if type(score) is not int or not 0<=score<=100:score=None
+        for path in confidence.get('evidence_paths',[]):
+            if path and path not in evidence:evidence.append(path)
         projects.append(dict(id=p.get('id',''),stage=p.get('stage',''),name=p.get('name',''),
                              path=p.get('path',''),source=p.get('source',''),status=p.get('status','待复核'),
-                             issues=issues,parent=p.get('candidate_parent',''),evidence=evidence[:8],
-                             observation=(p.get('manual_observation') or {}).get('observation','')))
+                             issues=issues,parent=p.get('candidate_parent',''),evidence=evidence,
+                             observation=(p.get('manual_observation') or {}).get('observation',''),
+                             confidence_score=score,confidence_reason=confidence.get('reason',''),
+                             confidence_scope=confidence.get('review_scope',''),reviewed_by=confidence.get('reviewed_by',''),reviewed_at=confidence.get('updated_at','')))
     total=len(projects);issue_count=sum(bool(p['issues']) for p in projects)
     stages=sorted({p['stage'] for p in projects if p['stage']})
+    def summarize_bucket(items,label):
+        return dict(stage=label,total=len(items),score_100=sum(x['confidence_score']==100 for x in items),score_60=sum(x['confidence_score']==60 for x in items),score_40=sum(x['confidence_score']==40 for x in items),score_0=sum(x['confidence_score']==0 for x in items),unscored=sum(x['confidence_score'] not in (100,60,40,0) for x in items))
+    summary_table=dict(rows=[summarize_bucket([p for p in projects if p['stage']==st],st) for st in stages],totals=summarize_bucket(projects,'合计'))
     query=params.get('q',[''])[0].strip().casefold()
     stage=params.get('stage',[''])[0]
     kind=params.get('kind',['all'])[0]
     if kind not in ('issues','all'):raise ValueError('无效的复核筛选条件')
-    projects=[p for p in projects if (kind=='all' or p['issues']) and (not stage or p['stage']==stage)
+    score_filter=params.get('score',[''])[0].strip()
+    if score_filter not in ('','100','60','40','0','unscored'):raise ValueError('无效的置信度筛选条件')
+    def match_score(s):
+        return True if not score_filter else (s not in (100,60,40,0) if score_filter=='unscored' else s==int(score_filter))
+    projects=[p for p in projects if (kind=='all' or p['issues']) and (not stage or p['stage']==stage) and match_score(p['confidence_score'])
               and (not query or query in json.dumps(p,ensure_ascii=False).casefold())]
     projects.sort(key=lambda p:(not any(i!='原索引标记边界复核' for i in p['issues']),not bool(p['issues']),p['stage'],p['name']))
     size=30;count=len(projects);pages=max(1,(count+size-1)//size)
     page=max(1,min(int(params.get('page',['1'])[0]),pages))
     return dict(available=True,projects=projects[(page-1)*size:page*size],count=count,page=page,pages=pages,
-                total_projects=total,issue_projects=issue_count,stages=stages,created_at=ledger.get('created_at',''))
+                total_projects=total,issue_projects=issue_count,stages=stages,created_at=ledger.get('created_at',''),summary_table=summary_table)
+
+def save_organize_decision(payload):
+    if not isinstance(payload,dict):raise ValueError('请求参数格式无效。')
+    ledgers=sorted((BASE/'work').glob('项目边界全量复核台账_*.json'),key=lambda p:p.stat().st_mtime,reverse=True)
+    if not ledgers:raise FileNotFoundError('尚未生成整理复核台账。')
+    ledger_path=ledgers[0]
+    ledger=read_json(ledger_path)
+    if not isinstance(ledger,dict) or not isinstance(ledger.get('projects'),list):raise ValueError('整理复核台账格式无效。')
+    proj_id=str(payload.get('id') or '').strip()
+    if not proj_id:raise ValueError('缺少项目ID。')
+    score_raw=payload.get('score')
+    if score_raw in (None,'','unscored'):new_score=None
+    else:
+        try:new_score=int(score_raw)
+        except (TypeError,ValueError):raise ValueError('置信度评分格式无效。')
+        if new_score not in (100,60,40,0):raise ValueError('置信度评分仅支持 100、60、40、0 或未评分。')
+    target=next((p for p in ledger['projects'] if p.get('id')==proj_id),None)
+    if not target:raise FileNotFoundError('未找到对应的复核项目。')
+    bc=dict(target.get('boundary_confidence') or {})
+    bc['score']=new_score
+    if 'reason' in payload and payload.get('reason') is not None:
+        reason_text=str(payload.get('reason')).strip()
+        if reason_text:bc['reason']=reason_text
+    if not bc.get('reason'):bc['reason']='人工审核确认' if new_score==100 else '人工审核标记待核'
+    bc['reviewed_by']='manual'
+    bc['updated_at']=datetime.now().isoformat(timespec='seconds')
+    target['boundary_confidence']=bc
+    target['status']='人工复核通过' if new_score==100 else ('待完成逐项目证据复核' if new_score is None else '人工标记复核')
+    write_json(ledger_path,ledger)
+    return dict(updated_id=proj_id,score=new_score,status=target['status'],reason=bc['reason'],reviewed_by='manual',reviewed_at=bc['updated_at'])
 
 def mount_update(**changes):
     global MOUNT_LAST_SAVE
@@ -470,10 +514,17 @@ def mount_view(params=None):
                 page=page,pages=pages,count=len(filtered),chains=chains,chains_truncated=len(chains)>=200)
     response.update(methods=result.get('methods',['M2']),m1_statistics=result.get('m1_statistics'),skip_statistics=result.get('skip_statistics'))
     if params.get('view',[''])[0]=='projects':
+        projects = [f for f in result['folders'] if f.get('kind') != 'ungrouped']
+        response['summary']['stage_projects'] = [dict(stage_id=stage, total=sum(f['stage']==stage for f in projects),
+            linked=sum(f['stage']==stage and f['id'] in linked for f in projects),
+            unlinked=sum(f['stage']==stage and f['id'] not in linked for f in projects)) for stage, _ in STAGES]
         rows=project_rows(result)
         categories=set(params.get('categories',['all'])[0].split(','))
+        selected_stages=set(params.get('stages',['all'])[0].split(','))
         chosen=[row for row in rows if (status=='all' or (row['unlinked'] if status=='unlinked' else row['status']==status))
                 and ('all' in categories or 'review' in categories and row['status'] in ('pending','review') or 'unlinked' in categories and row['unlinked'])
+                and ('all' in selected_stages or any(row['stages'].get(stage) for stage in selected_stages)
+                     or any(link['status'] not in ('confirmed','rejected') and (link['left']['stage'] in selected_stages or link['right']['stage'] in selected_stages) for link in row['links']))
                 and (pair=='all' or (any(row['stages'].get(stage) for stage in pair.split('-')) if status=='unlinked' or '-' not in pair else any(link['left']['stage']+'-'+link['right']['stage']==pair for link in row['links'])))
                 and query in mount_search(row)]
         pages=max(1,(len(chosen)+49)//50); page=min(requested_page,pages)
@@ -621,6 +672,9 @@ class Handler(BaseHTTPRequestHandler):
             parts=urlsplit(self.path).path.strip('/').split('/')
             if parts==['api','organize-review']:
                 return self.json(organize_view(parse_qs(urlsplit(self.path).query)))
+            if parts==['api','organize-review','summary']:
+                data=organize_view()
+                return self.json(dict(available=data['available'],created_at=data.get('created_at',''),summary_table=data['summary_table']))
             if parts[:2]==['api','stage2']:
                 params=parse_qs(urlsplit(self.path).query)
                 with STAGE2_LOCK, closing(Stage2()) as service:
@@ -795,6 +849,8 @@ class Handler(BaseHTTPRequestHandler):
                         if not path.exists():path.write_bytes(payload)
                         return self.json(dict(rows=service.import_values(path)))
                 raise FileNotFoundError('第二阶段接口不存在')
+            if parts==['api','organize-review','decision']:
+                with MOUNT_LOCK:return self.json(save_organize_decision(json.loads(self.body(65536))))
             if parts==['api','folder-mount','open-path']:
                 payload=json.loads(self.body(65536))
                 return self.json(open_local_path(payload.get('path',''),payload.get('action','folder')))

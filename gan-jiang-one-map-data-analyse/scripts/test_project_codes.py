@@ -24,6 +24,23 @@ OTHER = '2017-360199-27-03-014459'
 
 
 class ProjectCodeTests(unittest.TestCase):
+    def test_stage_filter_union_includes_candidates_before_pagination(self):
+        folder = lambda stage: dict(stage=stage)
+        rows = [dict(id=str(i), name=str(i), status='unlinked', unlinked=True, stages={'S1': [folder('S1')]}, links=[]) for i in range(51)]
+        rows += [dict(id='candidate', name='candidate', status='pending', unlinked=False, stages={'S2': [folder('S2')]}, links=[dict(status='pending', left=folder('S2'), right=folder('S3'))]),
+                 dict(id='rejected', name='rejected', status='unlinked', unlinked=True, stages={'S4': [folder('S4')]}, links=[dict(status='rejected', left=folder('S4'), right=folder('S3'))])]
+        with patch.object(server, 'mount_result', return_value=dict(folders=[], links=[])), patch.object(server, 'project_rows', return_value=rows):
+            for stages, count in [('S1', 51), ('S3', 1), ('S1,S3', 52), ('none', 0)]:
+                view = server.mount_view({'view': ['projects'], 'stages': [stages], 'page': ['2']})
+                self.assertEqual((view['count'], view['pages']), (count, max(1, (count + 49) // 50)))
+
+    def test_stage_project_counts_include_pending_and_exclude_rejected(self):
+        folders = [dict(id='a', stage='S1', name='a', folder='a'), dict(id='b', stage='S2', name='b', folder='b'), dict(id='c', stage='S2', name='c', folder='c'), dict(id='d', stage='S3', name='d', folder='d'), dict(id='e', stage='S3', name='e', folder='e', kind='ungrouped')]
+        links = [dict(left=folders[0], right=folders[1], status='pending'), dict(left=folders[1], right=folders[3], status='rejected')]
+        with patch.object(server, 'mount_result', return_value=dict(folders=folders, links=links)), patch.object(server, 'project_rows', return_value=[]):
+            counts = server.mount_view({'view': ['projects']})['summary']['stage_projects']
+        self.assertEqual([(s['total'], s['linked'], s['unlinked']) for s in counts[:3]], [(1, 1, 0), (2, 1, 1), (1, 0, 1)])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(dir=BASE / 'work')
         self.addCleanup(temporary.cleanup)

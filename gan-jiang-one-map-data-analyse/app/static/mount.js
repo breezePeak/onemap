@@ -416,13 +416,15 @@ const renderMount = data => {
       const checkbox = node('input', {type: 'checkbox', checked: true});
       checkbox.onchange = () => {
         if (checkbox.checked) hiddenMountStages.delete(stage.stage_id); else hiddenMountStages.add(stage.stage_id);
-        if ($('#mountTable').ariaBusy !== 'true') renderProjectMountTable(mountData);
+        mountPage = 1;
+        loadMount();
       };
       return node('label', {}, [checkbox, stage.title || stage.name]);
     }));
   }
   $('#mountPhase').textContent = `${data.phase || '已就绪'}${data.scanned_at ? ` · ${data.scanned_at.replace('T', ' ')}` : ''}`;
-  $('#mountSummary').textContent = `总项目 ${data.summary.projects} · 需要审核 ${data.summary.project_needs_review} · 未关联 ${data.summary.project_unlinked}`;
+  $('#mountSummary').textContent = (data.summary.stage_projects || []).map(s => `${s.stage_id}: ${s.total} / ${s.unlinked}`).join('　');
+  $('#mountSummary').title = '总项目数 / 未关联项目数；点击查看统计图';
   $('#mountPage').textContent = `${data.page || 1} / ${data.pages || 1}`;
   $('#mountPageInput').value = data.page || 1;
   $('#mountPageInput').max = data.pages || 1;
@@ -437,7 +439,8 @@ const loadMount = () => {
   $('#mountTable').ariaBusy = 'true';
   $('#mountTable').replaceChildren(node('div', {className: 'mount-loading', role: 'status'}, [node('span', {className: 'spinner', ariaHidden: 'true'}), '正在加载项目…']));
   const categories = $('#mountCategoryFilters').value;
-  return api(`/api/folder-mount?view=projects&page=${mountPage}&categories=${encodeURIComponent(categories)}&q=${encodeURIComponent($('#mountQuery').value.trim())}`)
+  const stages = mountStageConfig.length ? mountStageConfig.filter(stage => !hiddenMountStages.has(stage.stage_id)).map(stage => stage.stage_id).join(',') || 'none' : 'all';
+  return api(`/api/folder-mount?view=projects&page=${mountPage}&categories=${encodeURIComponent(categories)}&stages=${encodeURIComponent(stages)}&q=${encodeURIComponent($('#mountQuery').value.trim())}`)
     .then(data => { if (request === mountRequest) renderMount(data); }).catch(error => {
       if (request !== mountRequest) return;
       $('#mountPhase').textContent = `关联结果读取失败：${error.message}`;
@@ -447,6 +450,21 @@ const loadMount = () => {
 };
 
 /* ==================== 事件绑定 ==================== */
+$('#mountSummary').onclick = () => {
+  const stages = mountData?.summary.stage_projects || [];
+  $('#mountStatsChart').replaceChildren(...stages.map(s => {
+    const bar = node('div', {className: 'mount-stats-bar', ariaHidden: 'true'});
+    const linked = node('span', {className: 'mount-stats-linked'});
+    linked.style.width = `${s.total ? s.linked / s.total * 100 : 0}%`;
+    bar.append(linked);
+    return node('div', {className: 'mount-stats-row'}, [
+      node('strong', {textContent: mountStageName(s.stage_id)}), bar,
+      node('span', {textContent: `总数 ${s.total} · 已关联 ${s.linked} · 未关联 ${s.unlinked}`}),
+    ]);
+  }));
+  $('#mountStatsDialog').showModal();
+};
+$('#closeMountStats').onclick = () => $('#mountStatsDialog').close();
 let mountQueryTimer;
 $('#mountCategoryFilters').onchange = () => {
   mountPage = 1;

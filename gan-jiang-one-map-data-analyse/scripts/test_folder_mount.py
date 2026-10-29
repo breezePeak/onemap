@@ -248,7 +248,8 @@ class FolderMountTests(unittest.TestCase):
         ledger = {'created_at': 'test', 'projects': [
             {'id': 'a', 'stage': STAGES[0][1], 'name': '甲', 'path': str(self.root / STAGES[0][1] / '甲'),
              'source': str(self.root / '原始甲'), 'status': '待完成逐项目证据复核', 'issues': [],
-             'initial_ocr_evidence': {'path': str(self.root / '材料.pdf'), 'text_excerpt': '不应返回的文书正文'}},
+             'initial_ocr_evidence': {'path': str(self.root / '材料.pdf'), 'text_excerpt': '不应返回的文书正文'},
+             'boundary_confidence': {'score': 60, 'reason': '材料组未核完', 'review_scope': '核对首页', 'evidence_paths': [str(self.root / '证据.pdf')]}},
             {'id': 'b', 'stage': STAGES[3][1], 'name': '乙', 'path': str(self.root / STAGES[3][1] / '乙'),
              'status': '待完成逐项目证据复核', 'issues': ['宗地编号不一致']},
         ]}
@@ -262,10 +263,18 @@ class FolderMountTests(unittest.TestCase):
             self.assertEqual(result['count'], 1)
             result, _ = self.api('/api/organize-review?kind=all&q=%E7%94%B2')
             self.assertEqual(result['count'], 1)
-            self.assertEqual(result['projects'][0]['evidence'], [str(self.root / '材料.pdf')])
+            self.assertEqual(result['projects'][0]['evidence'], [str(self.root / '材料.pdf'), str(self.root / '证据.pdf')])
+            self.assertEqual(result['projects'][0]['confidence_score'], 60)
+            self.assertEqual(result['projects'][0]['confidence_reason'], '材料组未核完')
+            self.assertEqual(result['projects'][0]['confidence_scope'], '核对首页')
             self.assertNotIn('不应返回的文书正文', json.dumps(result, ensure_ascii=False))
+            ledger['projects'][0]['boundary_confidence']['evidence_paths'] = [str(self.root / f'证据{i}.pdf') for i in range(10)]
+            (work / '项目边界全量复核台账_测试.json').write_text(json.dumps(ledger, ensure_ascii=False), encoding='utf-8')
+            result, _ = self.api('/api/organize-review?kind=all&q=%E7%94%B2')
+            self.assertEqual(len(result['projects'][0]['evidence']), 11)
             result, _ = self.api('/api/organize-review?kind=all&stage=' + STAGES[3][1])
             self.assertEqual(result['projects'][0]['name'], '乙')
+            self.assertIsNone(result['projects'][0]['confidence_score'])
         with patch.object(server, 'BASE', self.base / 'empty'):
             result, _ = self.api('/api/organize-review')
             self.assertFalse(result['available'])
@@ -725,6 +734,51 @@ class FolderMountTests(unittest.TestCase):
             self.assertFalse(view['historical'])
             self.assertEqual(view['summary']['links'], 1)
             self.assertTrue(view['rows'])
+
+    def test_organize_review_summary_table_and_score_filter(self):
+        ledger_path = self.base / 'work/项目边界全量复核台账_2099-01-01.json'
+        server.write_json(ledger_path, {
+            'created_at': '2099-01-01T00:00:00',
+            'projects': [
+                {'id': 'p1', 'stage': '1.选址阶段', 'name': '项目1', 'boundary_confidence': {'score': 100, 'reason': '清楚'}},
+                {'id': 'p2', 'stage': '1.选址阶段', 'name': '项目2', 'issues': ['同名分卷'], 'boundary_confidence': {'score': 60, 'reason': '存疑'}},
+                {'id': 'p3', 'stage': '2.规划条件阶段', 'name': '项目3', 'issues': ['多对象混杂'], 'boundary_confidence': {'score': 40, 'reason': '混杂'}},
+                {'id': 'p4', 'stage': '5.土地首次登记', 'name': '项目4', 'issues': ['空目录'], 'boundary_confidence': {'score': 0, 'reason': '空'}},
+                {'id': 'p5', 'stage': '5.土地首次登记', 'name': '项目5', 'boundary_confidence': {'score': None, 'reason': '未评'}},
+            ],
+        })
+        with patch.object(server, 'BASE', self.base):
+            data, status = self.api('/api/organize-review')
+            self.assertEqual(status, 200)
+            st = data['summary_table']
+            self.assertEqual(st['totals'], {
+                'stage': '合计', 'total': 5, 'score_100': 1, 'score_60': 1, 'score_40': 1, 'score_0': 1, 'unscored': 1,
+            })
+            row_s1 = next(r for r in st['rows'] if r['stage'] == '1.选址阶段')
+            self.assertEqual(row_s1, {
+                'stage': '1.选址阶段', 'total': 2, 'score_100': 1, 'score_60': 1, 'score_40': 0, 'score_0': 0, 'unscored': 0,
+            })
+            for score_val, expected_id in (('100', 'p1'), ('60', 'p2'), ('40', 'p3'), ('0', 'p4'), ('unscored', 'p5')):
+                filtered, f_status = self.api(f'/api/organize-review?score={score_val}')
+                self.assertEqual(f_status, 200)
+                self.assertEqual(filtered['count'], 1)
+                self.assertEqual(filtered['projects'][0]['id'], expected_id)
+            s1_60, _ = self.api('/api/organize-review?stage=1.%E9%80%89%E5%9D%80%E9%98%B6%E6%AE%B5&score=60')
+            self.assertEqual(s1_60['count'], 1)
+            self.assertEqual(s1_60['projects'][0]['id'], 'p2')
+            summary_only, sum_status = self.api('/api/organize-review/summary')
+            self.assertEqual(sum_status, 200)
+            self.assertEqual(summary_only['summary_table']['totals']['total'], 5)
+            dec_res, dec_status = self.api('/api/organize-review/decision', {
+                'id': 'p2', 'score': 100, 'reason': '人工核实已完整归档',
+            })
+            self.assertEqual(dec_status, 200)
+            self.assertEqual(dec_res['score'], 100)
+            self.assertEqual(dec_res['reviewed_by'], 'manual')
+            after_dec, _ = self.api('/api/organize-review?score=100')
+            self.assertEqual(after_dec['count'], 2)
+            self.assertEqual(after_dec['summary_table']['totals']['score_100'], 2)
+            self.assertEqual(after_dec['summary_table']['totals']['score_60'], 0)
 
 
 if __name__ == '__main__':

@@ -16,14 +16,49 @@
     </nav>
     <section id="organizeModule" class="mount-module">
       <header class="mount-heading"><h1>整理目录 · 人工复核</h1><span id="organizePhase" role="status">正在读取复核台账…</span></header>
-      <p class="organize-notice">先核对整理后的项目边界，再进行目录关联。以下为复核台账快照；未完成核验不代表已通过。</p>
+      <p class="organize-notice">以下为复核台账快照。结构清楚且未发现疑点的目录可标记100%；混杂或有疑点的目录继续复核。置信度不是统计准确率。</p>
       <div class="mount-simple-toolbar">
         <input id="organizeQuery" type="search" placeholder="搜索项目、路径或问题" aria-label="搜索整理项目">
         <label>显示：<select id="organizeKind" aria-label="筛选复核项目"><option value="all">全部项目</option><option value="issues">已发现问题</option></select></label>
         <label>阶段：<select id="organizeStage" aria-label="筛选业务阶段"><option value="">全部阶段</option></select></label>
+        <label>置信度：<select id="organizeScore" aria-label="筛选归属置信度"><option value="">全部评分</option><option value="100">100%（目录结构清楚）</option><option value="60">60%（部分存疑/待交叉核对）</option><option value="40">40%（多对象混杂/冲突/损坏）</option><option value="0">0%（空目录）</option><option value="unscored">未评分</option></select></label>
         <button id="organizeRefresh" class="secondary" type="button">刷新台账</button>
       </div>
-      <div id="organizeList" class="organize-list" aria-live="polite"></div>
+      <div class="organize-split">
+        <aside id="organizeStatsPanel" class="organize-stats-panel" aria-label="全量复核结果总览">
+          <div class="organize-stats-header"><h2 id="organizeStatsTitle">全量复核结果总览</h2></div>
+          <div class="organize-stats-wrap">
+            <table id="organizeStatsTable" class="organize-stats-table">
+              <thead>
+                <tr>
+                  <th>阶段目录</th>
+                  <th>项目总数</th>
+                  <th>100%<small>（目录结构清楚）</small></th>
+                  <th>60%<small>（部分存疑/待交叉核对）</small></th>
+                  <th>40%<small>（多对象混杂/冲突/损坏）</small></th>
+                  <th>0%<small>（空目录）</small></th>
+                  <th>未评分</th>
+                </tr>
+              </thead>
+              <tbody id="organizeStatsBody"></tbody>
+              <tfoot id="organizeStatsFoot"></tfoot>
+            </table>
+          </div>
+          <div class="organize-criteria" id="organizeCriteria">
+            <div class="organize-stats-header"><h2>置信度评分标准</h2></div>
+            <ul class="organize-criteria-list">
+              <li><span class="criteria-tag tier-100">100%</span><div><strong>目录结构清楚</strong><p>目录边界清晰，内部文书、图件或表格指向同一项目/同一批次/同一许可证或宗地单元，无跨项目混装。</p></div></li>
+              <li><span class="criteria-tag tier-60">60%</span><div><strong>部分存疑 / 待核对本目录边界</strong><p>本文件夹主材料指向同一项目，但本阶段内存在同名分卷、多宗地并宗/延期合卷或待归属区同名目录，需核实本文件夹边界与材料完整性（不涉及跨阶段关联）。</p></div></li>
+              <li><span class="criteria-tag tier-40">40%</span><div><strong>多对象混杂 / 冲突 / 损坏</strong><p>同一目录混装多个不同项目或地块、内部编号（批复/合同/证号/地籍号）冲突，或压缩包损坏无法核验，需人工拆分或排障。</p></div></li>
+              <li><span class="criteria-tag tier-0">0%</span><div><strong>空目录 / 无效残留</strong><p>目录内无任何有效业务文件（仅剩空文件夹或残片），不构成有效项目资料包。</p></div></li>
+            </ul>
+            <p class="organize-criteria-tip">提示：点击上方表格数字可按阶段与置信度筛选；在右侧项目卡片底部可直接点击分值按钮或填写意见完成人工审核。</p>
+          </div>
+        </aside>
+        <div class="organize-main-panel">
+          <div id="organizeList" class="organize-list" aria-live="polite"></div>
+        </div>
+      </div>
       <footer class="mount-simple-footer"><span id="organizeSummary"></span><button id="organizePrev" class="secondary" type="button">上一页</button><span id="organizePage">1 / 1</span><button id="organizeNext" class="secondary" type="button">下一页</button></footer>
     </section>
     <section id="directoryModule" class="hidden">
@@ -45,7 +80,7 @@
         <p class="mount-table-hint">显示第二阶段新挂接结果。勾选阶段列中的候选项目，再确认关联；点击路径打开目录。</p>
         <div id="mountTable" class="mount-table-wrap"></div>
         <footer class="mount-simple-footer">
-          <span id="mountSummary"></span>
+          <button id="mountSummary" type="button" aria-label="查看各阶段项目关联统计图"></button>
           <button id="mountPrev" class="secondary" type="button">上一页</button>
           <span id="mountPage">1 / 1</span>
           <button id="mountNext" class="secondary" type="button">下一页</button>
@@ -105,6 +140,10 @@
 <dialog id="spatialDialog" aria-labelledby="spatialTitle">
   <header class="spatial-header"><div><h2 id="spatialTitle">空间相交图</h2><p id="spatialSubtitle"></p></div><button id="closeSpatial" class="secondary" autofocus>关闭 ✕</button></header>
   <div id="spatialContent" aria-live="polite"></div>
+</dialog>
+<dialog id="mountStatsDialog" aria-labelledby="mountStatsTitle">
+  <header class="spatial-header"><div><h2 id="mountStatsTitle">各阶段项目关联情况</h2><p>绿色：已关联（含待审核候选）；橙色：未关联。每条按该阶段项目总数计算比例。</p></div><button id="closeMountStats" class="secondary" type="button">关闭 ✕</button></header>
+  <div id="mountStatsChart"></div>
 </dialog>
 
     <dialog id="mountReviewDialog" aria-label="跨阶段关联证据核对与冲突处理">
